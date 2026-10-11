@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-11)
 
 First release. Behaves like jsonpatch 1.34 with `make_patch`, `apply`/`apply_patch`
 and patch validation in Rust:
