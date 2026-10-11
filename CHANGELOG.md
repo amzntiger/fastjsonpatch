@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 (2026-10-11)
+
+Documentation only: the README now states only measured facts, and its link to
+MAINTAINING.md works on PyPI. No code changes.
+
 ## 0.1.0 (2026-10-11)
 
 First release. Behaves like jsonpatch 1.34 with `make_patch`, `apply`/`apply_patch`
