@@ -1,0 +1,157 @@
+# Tests on every OS / Python, builds wheels for every platform, publishes on tags.
+#
+# - push / pull request: test matrix + wheel builds
+# - manual run with target=testpypi: also publish to TestPyPI
+# - tag v*: also publish to PyPI (the tag must equal the version in pyproject.toml)
+#
+# Publishing uses PyPI trusted publishing (no token): register this repository and
+# workflow on pypi.org / test.pypi.org under the environments "pypi" / "testpypi".
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Publish to"
+        type: choice
+        options: [none, testpypi]
+        default: none
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test ${{ matrix.os }} py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and install the wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --release --out dist
+          python -m pip install --only-binary fastjsonpatch --find-links dist "fastjsonpatch[test]"
+      - name: Tests (parity with jsonpatch, upstream suite, RFC 6902 suite)
+        shell: bash
+        run: |
+          mkdir -p results
+          python -m pytest -q -p no:cacheprovider tests 2>&1 | tee pytest.log
+          tail -1 pytest.log > results/tests.txt
+      - name: Speed vs jsonpatch
+        shell: bash
+        run: |
+          python bench/compare.py > results/compare.json
+          python -c "import json, sys; r = json.load(open('results/compare.json')); r['tests'] = open('results/tests.txt').read().strip(); r['runner'] = sys.argv[1]; json.dump(r, open('results/compare.json', 'w'))" "${{ matrix.os }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.os }}-${{ matrix.python }}
+          path: results/compare.json
+
+  report:
+    name: matrix report
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: results
+      - name: Write the comparison table to the job summary
+        run: |
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import glob, json
+          rows = [json.load(open(f)) for f in sorted(glob.glob("results/*/compare.json"))]
+          cases = list(rows[0]["results"]) if rows else []
+          print("| runner | OS / arch | Python | tests | " + " | ".join(cases) + " |")
+          print("|---|---|---|---|" + "---|" * len(cases))
+          for r in rows:
+              cells = [f"{r['results'][c]['jsonpatch_ms']:.1f} → {r['results'][c]['fastjsonpatch_ms']:.1f} ms "
+                       f"(**{r['results'][c]['speedup']}x**)" for c in cases]
+              print(f"| {r['runner']} | {r['os']} {r['machine']} | {r['python']} | {r['tests']} | " + " | ".join(cells) + " |")
+          EOF
+
+  wheels:
+    name: wheel ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: "2014" }
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2014" }
+          - { name: musllinux-x86_64, runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { name: musllinux-aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: musllinux_1_2 }
+          - { name: macos-arm64, runner: macos-latest, target: aarch64 }
+          - { name: macos-x86_64, runner: macos-15-intel, target: x86_64 }
+          - { name: windows-x64, runner: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform.name }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  publish:
+    name: publish to ${{ startsWith(github.ref, 'refs/tags/v') && 'PyPI' || 'TestPyPI' }}
+    needs: [test, wheels, sdist]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'pypi' || 'testpypi' }}
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          test "v$version" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != version $version"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - run: ls -la dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ startsWith(github.ref, 'refs/tags/v') && 'https://upload.pypi.org/legacy/' || 'https://test.pypi.org/legacy/' }}

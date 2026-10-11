@@ -1,0 +1,40 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fastjsonpatch"
+version = "0.1.0"
+description = "Drop-in faster jsonpatch (RFC 6902): make_patch and apply in Rust"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES.md"]
+authors = [{ email = "bitsbybyun@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = ["jsonpointer>=3.0,<4"]
+keywords = ["json", "patch", "jsonpatch", "rfc6902", "diff", "rust"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Repository = "https://github.com/amzntiger/fastjsonpatch"
+Issues = "https://github.com/amzntiger/fastjsonpatch/issues"
+Changelog = "https://github.com/amzntiger/fastjsonpatch/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+# jsonpatch is the reference implementation the parity tests compare against.
+test = ["pytest", "jsonpatch==1.34"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "fastjsonpatch._core"
+features = ["pyo3/extension-module"]
+exclude = ["**/__pycache__/**", { path = "dist/**", format = "sdist" }, { path = "target/**", format = "sdist" }]
