@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.1.1 (2026-10-11)
+## 0.1.2 (2026-10-11)
 
-Documentation only: the README now states only measured facts, and its link to
-MAINTAINING.md works on PyPI. No code changes.
+Documentation only: the README now states only measured facts (including exactly
+which platforms CI tests), and its link to MAINTAINING.md works on PyPI. No code
+changes. (0.1.1 was tagged but not published.)
 
 ## 0.1.0 (2026-10-11)
 

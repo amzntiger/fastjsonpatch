@@ -1,6 +1,6 @@
 [package]
 name = "fastjsonpatch"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Rust core of the fastjsonpatch Python package"
 license = "BSD-3-Clause"
