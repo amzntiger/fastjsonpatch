@@ -88,9 +88,9 @@ your own machine.
 **make_patch.** jsonpatch walks both documents in Python and compares every scalar
 with `json.dumps(a) == json.dumps(b)`. Profiling the "10k records" workload with
 cProfile puts about 40% of the time in `json.dumps` and about a third in `isinstance`
-checks against abstract base classes (`MutableMapping`, `MutableSequence`). fastjsonpatch walks the documents in Rust over the
-CPython objects directly (no conversion to a Rust data structure), compares values
-natively with the same rules as the `json.dumps` comparison (`1`, `1.0` and `True`
+checks against abstract base classes (`MutableMapping`, `MutableSequence`).
+fastjsonpatch walks the documents in Rust over the CPython objects directly (no
+conversion to a Rust data structure), compares values natively with the same rules as the `json.dumps` comparison (`1`, `1.0` and `True`
 are all different, `-0.0 != 0.0`, NaN equals NaN), keeps the current path on a stack,
 and takes a single lockstep pass when two dicts have the same keys in the same order.
 It is a port of jsonpatch's `DiffBuilder`, so it produces the same operations in the
@@ -145,7 +145,9 @@ matches (currently `1.34`).
 
 ## How it is tested
 
-About 1,570 tests, run on every supported OS and Python version:
+About 1,570 tests. CI runs them with Python 3.12, 3.13 and 3.14 on Linux (x86_64 and
+aarch64, glibc), macOS (arm64 and x86_64) and Windows (x64); the musl wheels are built
+but not tested in CI:
 
 - **Parity:** random documents, mutations and patches (valid and invalid) run through
   both fastjsonpatch and jsonpatch 1.34, comparing the resulting patches and documents
