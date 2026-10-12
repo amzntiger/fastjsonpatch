@@ -965,5 +965,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(apply, m)?)?;
     m.add_function(wrap_pyfunction!(validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_deepcopy, m)?)?;
+    // The package version, so `fastjsonpatch.__version__` needs no importlib.metadata.
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

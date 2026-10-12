@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `import fastjsonpatch` takes about 11 ms instead of about 53 ms: `__version__` now
+  comes from the Rust module instead of `importlib.metadata`, which is no longer
+  imported. (jsonpatch 1.34 takes about 11 ms.)
+
 ## 0.1.3 (2026-10-12)
 
 - Fix: `replace` with a path ending in `-` that names a dict key (`{"-": 1}`,

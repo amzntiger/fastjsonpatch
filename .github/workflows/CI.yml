@@ -44,7 +44,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip maturin
           maturin build --release --out dist
-          python -m pip install --only-binary fastjsonpatch --find-links dist "fastjsonpatch[test]"
+          # Install the wheel just built by its path: with --find-links, pip prefers a
+          # PyPI wheel of the same version and platform tag over the local one.
+          wheel=$(ls dist/*.whl)
+          python -m pip install "${wheel}[test]"
       - name: Tests (parity with jsonpatch, upstream suite, RFC 6902 suite)
         shell: bash
         run: |
