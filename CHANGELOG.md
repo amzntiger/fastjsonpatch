@@ -1,10 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 (2026-10-12)
 
 - `import fastjsonpatch` takes about 11 ms instead of about 53 ms: `__version__` now
   comes from the Rust module instead of `importlib.metadata`, which is no longer
   imported. (jsonpatch 1.34 takes about 11 ms.)
+- CI: the macOS and Windows test jobs installed the wheel from PyPI instead of the
+  one built in the job whenever both had the same version; they now install the
+  built wheel by path. No change to the package.
 
 ## 0.1.3 (2026-10-12)
 
