@@ -10,11 +10,10 @@
 //!   anything is mutated, so errors and edge cases behave like jsonpatch.
 
 use ahash::AHashMap;
-use pyo3::exceptions::PyTypeError;
 use pyo3::ffi;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
 /// Deeper documents go to the reference implementation (which raises RecursionError).
 const MAX_DEPTH: usize = 1000;
@@ -155,40 +154,29 @@ fn same_keys_in_order(a: &Bound<'_, PyDict>, b: &Bound<'_, PyDict>) -> PyResult<
 
 // ---------------------------------------------------------------- paths
 
+/// An object key or an array index, as `DiffBuilder` keeps them in "parts".
 #[derive(Clone)]
 enum Part<'py> {
+    /// always valid UTF-8 (checked by `key_part`)
     Key(Bound<'py, PyString>),
     Idx(i64),
+}
+
+fn key_str<'a>(k: &'a Bound<'_, PyString>) -> &'a str {
+    k.to_str().unwrap_or_default()
 }
 
 impl PartialEq for Part<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Part::Idx(a), Part::Idx(b)) => a == b,
-            (Part::Key(a), Part::Key(b)) => {
-                a.is(b)
-                    || match (a.to_str(), b.to_str()) {
-                        (Ok(x), Ok(y)) => x == y,
-                        _ => a.as_any().eq(b).unwrap_or(false),
-                    }
-            }
+            (Part::Key(a), Part::Key(b)) => a.is(b) || key_str(a) == key_str(b),
             _ => false,
         }
     }
 }
 
 type Path<'py> = Vec<Part<'py>>;
-
-fn is_int(p: &Part) -> bool {
-    matches!(p, Part::Idx(_))
-}
-
-fn idx(p: &Part) -> i64 {
-    match p {
-        Part::Idx(i) => *i,
-        Part::Key(_) => i64::MIN, // unreachable for paths produced by the diff
-    }
-}
 
 fn is_prefix(sub: &[Part], parts: &[Part]) -> bool {
     sub.len() <= parts.len() && sub == &parts[..sub.len()]
@@ -198,48 +186,19 @@ fn is_inside(parts: &[Part], container: &[Part]) -> bool {
     parts.len() > container.len() && is_prefix(container, parts)
 }
 
-fn shift<'py>(parts: &[Part<'py>], depth: usize, offset: i64) -> Path<'py> {
-    let mut p = parts.to_vec();
-    p[depth] = Part::Idx(idx(&p[depth]) + offset);
-    p
-}
-
-/// `parts` assumes no item at `location`; adjust it to the item being there.
-fn with_item<'py>(parts: &[Part<'py>], location: &[Part<'py>], insertion: bool) -> Path<'py> {
-    let depth = location.len() - 1;
-    if is_int(&location[depth]) && is_inside(parts, &location[..depth]) {
-        let (index, loc) = (idx(&parts[depth]), idx(&location[depth]));
-        let before_item = insertion && parts.len() == location.len() && index == loc;
-        if index >= loc && !before_item {
-            return shift(parts, depth, 1);
-        }
-    }
-    parts.to_vec()
-}
-
 /// `parts` assumes an item at `location`; adjust it to the item missing.
 fn without_item<'py>(parts: &[Part<'py>], location: &[Part<'py>]) -> Path<'py> {
     let depth = location.len() - 1;
-    if is_int(&location[depth]) && is_inside(parts, &location[..depth]) && idx(&parts[depth]) > idx(&location[depth]) {
-        return shift(parts, depth, -1);
+    if let (Part::Idx(loc), true) = (&location[depth], is_inside(parts, &location[..depth])) {
+        if let Part::Idx(i) = parts[depth] {
+            if i > *loc {
+                let mut p = parts.to_vec();
+                p[depth] = Part::Idx(i - 1);
+                return p;
+            }
+        }
     }
     parts.to_vec()
-}
-
-/// Where the item at `location` is after inserting (or removing) the value at `parts`.
-fn item_after<'py>(location: &[Part<'py>], parts: &[Part<'py>], inserted: bool) -> Path<'py> {
-    let depth = parts.len() - 1;
-    if !is_int(&parts[depth]) || !is_inside(location, &parts[..depth]) {
-        return location.to_vec();
-    }
-    let (at, p) = (idx(&location[depth]), idx(&parts[depth]));
-    if inserted && at >= p {
-        return shift(location, depth, 1);
-    }
-    if !inserted && at > p {
-        return shift(location, depth, -1);
-    }
-    location.to_vec()
 }
 
 fn escape_into(out: &mut String, s: &str) {
@@ -252,16 +211,427 @@ fn escape_into(out: &mut String, s: &str) {
     }
 }
 
-fn to_pointer(path: &[Part]) -> R<String> {
+fn to_pointer(path: &[Part]) -> String {
     let mut s = String::new();
     for p in path {
         s.push('/');
         match p {
             Part::Idx(i) => s.push_str(&i.to_string()),
-            Part::Key(k) => escape_into(&mut s, k.to_str().map_err(|_| Fail::Unsupported)?),
+            Part::Key(k) => escape_into(&mut s, key_str(k)),
         }
     }
-    Ok(s)
+    s
+}
+
+/// A part of a location: like a `Part`, but an array item instead of its index, so
+/// it stays the same item when items are added or removed in front of it.
+#[derive(Clone)]
+enum LPart<'py> {
+    Key(Bound<'py, PyString>),
+    Item(usize),
+}
+
+impl PartialEq for LPart<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (LPart::Item(a), LPart::Item(b)) => a == b,
+            (LPart::Key(a), LPart::Key(b)) => a.is(b) || key_str(a) == key_str(b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for LPart<'_> {}
+
+impl std::hash::Hash for LPart<'_> {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        match self {
+            LPart::Key(k) => key_str(k).hash(h),
+            LPart::Item(i) => i.hash(h),
+        }
+    }
+}
+
+type Loc<'py> = Vec<LPart<'py>>;
+
+// ---------------------------------------------------------------- array items
+
+/// See `_ArrayItem`.
+struct Item {
+    array: usize,
+    label: i64,
+    initial: bool,
+}
+
+/// See `_ArrayItems`; holds item ids.
+#[derive(Default)]
+struct Array {
+    items: Vec<usize>,
+    labels: Vec<i64>,
+    present: Vec<usize>,
+    present_labels: Vec<i64>,
+}
+
+const LABEL_STEP: i64 = 1 << 16;
+const LABEL_GAP: i64 = 1 << 32;
+
+// ---------------------------------------------------------------- move keys
+
+/// Appends an encoding of `o` that is equal for two values exactly when
+/// `json.dumps(_sorted_members(value))` is. Values it cannot encode like that
+/// (non-str keys, non-JSON types, huge ints, deep nesting) are `Unsupported`.
+fn encode(o: &Bound<'_, PyAny>, depth: usize, out: &mut Vec<u8>) -> R<()> {
+    if depth > MAX_DEPTH {
+        return Err(Fail::Unsupported);
+    }
+    let put_str = |out: &mut Vec<u8>, s: &str| {
+        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    };
+    match kind(o) {
+        Kind::Dict => {
+            let d = o.cast::<PyDict>()?;
+            let mut members = Vec::with_capacity(d.len());
+            for (k, v) in d.iter() {
+                let k = k.cast_into_exact::<PyString>().map_err(|_| Fail::Unsupported)?;
+                k.to_str().map_err(|_| Fail::Unsupported)?;
+                members.push((k, v));
+            }
+            members.sort_by(|a, b| key_str(&a.0).cmp(key_str(&b.0)));
+            out.push(b'{');
+            out.extend_from_slice(&(members.len() as u64).to_le_bytes());
+            for (k, v) in &members {
+                put_str(out, key_str(k));
+                encode(v, depth + 1, out)?;
+            }
+        }
+        Kind::List => {
+            let l = o.cast::<PyList>()?;
+            out.push(b'[');
+            out.extend_from_slice(&(l.len() as u64).to_le_bytes());
+            for v in l.iter() {
+                encode(&v, depth + 1, out)?;
+            }
+        }
+        Kind::Str => {
+            out.push(b's');
+            put_str(out, o.cast::<PyString>()?.to_str().map_err(|_| Fail::Unsupported)?);
+        }
+        Kind::Int => {
+            out.push(b'i');
+            match o.extract::<i64>() {
+                Ok(i) => put_str(out, &i.to_string()),
+                // str() of a huge int raises, like json.dumps does
+                Err(_) => put_str(out, o.str().map_err(|_| Fail::Unsupported)?.to_str()?),
+            }
+        }
+        Kind::Float => {
+            let x = o.cast::<PyFloat>()?.value();
+            if x.is_nan() {
+                out.push(b'n'); // every NaN dumps as "NaN"
+            } else {
+                out.push(b'f');
+                out.extend_from_slice(&x.to_bits().to_le_bytes());
+            }
+        }
+        Kind::Bool => out.push(if o.is_truthy()? { b't' } else { b'F' }),
+        Kind::Null => out.push(b'z'),
+        Kind::Other => return Err(Fail::Unsupported),
+    }
+    Ok(())
+}
+
+fn move_key(o: &Bound<'_, PyAny>) -> R<Vec<u8>> {
+    let mut out = vec![];
+    encode(o, 0, &mut out)?;
+    Ok(out)
+}
+
+/// The JSON text of an int: `None` for a huge one, whose `str()` (and json.dumps) raises.
+fn int_text(o: &Bound<'_, PyAny>) -> R<Option<i64>> {
+    match o.extract::<i64>() {
+        Ok(i) => Ok(Some(i)),
+        Err(_) => {
+            o.str().map_err(|_| Fail::Unsupported)?;
+            Ok(None)
+        }
+    }
+}
+
+fn borrow<'a, 'py>(py: Python<'py>, p: *mut ffi::PyObject) -> Borrowed<'a, 'py, PyAny> {
+    // SAFETY: callers pass items borrowed from a live dict or list, with the GIL held.
+    unsafe { Borrowed::from_ptr(py, p) }
+}
+
+fn list_item<'a, 'py>(l: &'a Bound<'py, PyList>, i: usize) -> Borrowed<'a, 'py, PyAny> {
+    // SAFETY: `i` is in bounds; PyList_GetItem returns a borrowed reference.
+    borrow(l.py(), unsafe { ffi::PyList_GetItem(l.as_ptr(), i as ffi::Py_ssize_t) })
+}
+
+fn exact_str_key(k: &Bound<'_, PyAny>) -> R<()> {
+    if k.is_exact_instance_of::<PyString>() { Ok(()) } else { Err(Fail::Unsupported) }
+}
+
+/// A hash of `o` that is equal for values whose move keys are equal; `Unsupported`
+/// for non-JSON values, non-str keys, huge ints and deep nesting.
+fn json_hash(o: &Bound<'_, PyAny>, depth: usize, rs: &ahash::RandomState) -> R<u64> {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    if depth > MAX_DEPTH {
+        return Err(Fail::Unsupported);
+    }
+    let mut h = rs.build_hasher();
+    match kind(o) {
+        Kind::Dict => {
+            // members in any order hash the same
+            let d = o.cast::<PyDict>()?;
+            let (mut pos, mut sum) = (0, 0u64);
+            while let Some((k, v)) = dict_next(d, &mut pos) {
+                let k = borrow(o.py(), k);
+                exact_str_key(&k)?;
+                let mut m = rs.build_hasher();
+                (k.hash()?, json_hash(&borrow(o.py(), v), depth + 1, rs)?).hash(&mut m);
+                sum = sum.wrapping_add(m.finish());
+            }
+            (b'{', sum).hash(&mut h);
+        }
+        Kind::List => {
+            let l = o.cast::<PyList>()?;
+            b'['.hash(&mut h);
+            for i in 0..l.len() {
+                json_hash(&list_item(l, i), depth + 1, rs)?.hash(&mut h);
+            }
+        }
+        Kind::Str => (b's', o.hash()?).hash(&mut h),
+        Kind::Int => {
+            int_text(o)?;
+            (b'i', o.hash()?).hash(&mut h);
+        }
+        Kind::Float => {
+            let x = o.cast::<PyFloat>()?.value();
+            (b'f', if x.is_nan() { 0 } else { x.to_bits() }, x.is_nan()).hash(&mut h);
+        }
+        Kind::Bool => (b'b', o.is_truthy()?).hash(&mut h),
+        Kind::Null => b'z'.hash(&mut h),
+        Kind::Other => return Err(Fail::Unsupported),
+    }
+    Ok(h.finish())
+}
+
+/// Do `a` and `b` have the same move key? A comparison that ends early does not
+/// check the rest of the values for being supported.
+fn same_json(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, depth: usize) -> R<bool> {
+    if depth > MAX_DEPTH {
+        return Err(Fail::Unsupported);
+    }
+    let (ka, kb) = (kind(a), kind(b));
+    if ka == Kind::Other || kb == Kind::Other {
+        return Err(Fail::Unsupported);
+    }
+    if ka != kb {
+        return Ok(false);
+    }
+    let py = a.py();
+    Ok(match ka {
+        Kind::Dict => {
+            let (x, y) = (a.cast::<PyDict>()?, b.cast::<PyDict>()?);
+            if x.len() != y.len() {
+                return Ok(false);
+            }
+            // Usually both have their keys in the same order
+            let (mut px, mut pyy) = (0, 0);
+            while let (Some((k1, v1)), Some((k2, v2))) = (dict_next(x, &mut px), dict_next(y, &mut pyy)) {
+                let k1 = borrow(py, k1);
+                exact_str_key(&k1)?;
+                if !(k1.as_ptr() == k2 || (borrow(py, k2).is_exact_instance_of::<PyString>() && k1.eq(borrow(py, k2))?)) {
+                    return same_members(x, y, depth);
+                }
+                if !same_json(&borrow(py, v1), &borrow(py, v2), depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            true
+        }
+        Kind::List => {
+            let (x, y) = (a.cast::<PyList>()?, b.cast::<PyList>()?);
+            if x.len() != y.len() {
+                return Ok(false);
+            }
+            for i in 0..x.len() {
+                if !same_json(&list_item(x, i), &list_item(y, i), depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            true
+        }
+        Kind::Str => a.is(b) || a.eq(b)?,
+        Kind::Int => {
+            int_text(a)?;
+            int_text(b)?;
+            a.is(b) || a.eq(b)?
+        }
+        Kind::Float => {
+            let (x, y) = (a.cast::<PyFloat>()?.value(), b.cast::<PyFloat>()?.value());
+            (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits()
+        }
+        Kind::Bool => a.is(b),
+        Kind::Null => true,
+        Kind::Other => unreachable!(),
+    })
+}
+
+/// `same_json` for dicts of the same size whose keys are in different orders.
+fn same_members(x: &Bound<'_, PyDict>, y: &Bound<'_, PyDict>, depth: usize) -> R<bool> {
+    let py = x.py();
+    let mut pos = 0;
+    while let Some((k, v)) = dict_next(x, &mut pos) {
+        let k = borrow(py, k);
+        exact_str_key(&k)?;
+        match y.get_item(&*k)? {
+            Some(w) if same_json(&borrow(py, v), &w, depth + 1)? => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+/// `_positional_cost`
+fn positional_cost(old: &Bound<'_, PyAny>, new: &Bound<'_, PyAny>) -> PyResult<u64> {
+    if old.eq(new)? {
+        return Ok(0);
+    }
+    match (kind(old), kind(new)) {
+        (Kind::Dict, Kind::Dict) => {
+            let (o, n) = (old.cast::<PyDict>()?, new.cast::<PyDict>()?);
+            let mut c = 0;
+            for (k, v) in o.iter() {
+                c += match n.get_item(&k)? {
+                    Some(w) => positional_cost(&v, &w)?,
+                    None => 1,
+                };
+            }
+            for k in n.keys() {
+                c += !o.contains(&k)? as u64;
+            }
+            Ok(c)
+        }
+        (Kind::List, Kind::List) => {
+            let (o, n) = (old.cast::<PyList>()?, new.cast::<PyList>()?);
+            let mut c = o.len().abs_diff(n.len()) as u64;
+            for (v, w) in o.iter().zip(n.iter()) {
+                c += positional_cost(&v, &w)?;
+            }
+            Ok(c)
+        }
+        _ => Ok(1),
+    }
+}
+
+/// Ids of `items`, equal for items with equal move keys, continuing from `n_ids`.
+fn intern<'a, 'py>(
+    items: &'a [Bound<'py, PyAny>],
+    buckets: &mut AHashMap<u64, Vec<(u32, &'a Bound<'py, PyAny>)>>,
+    n_ids: &mut u32,
+    rs: &ahash::RandomState,
+) -> R<Vec<u32>> {
+    let mut out = Vec::with_capacity(items.len());
+    for o in items {
+        let bucket = buckets.entry(json_hash(o, 0, rs)?).or_default();
+        let mut id = None;
+        for &(i, c) in bucket.iter() {
+            if same_json(c, o, 0)? {
+                id = Some(i);
+                break;
+            }
+        }
+        out.push(match id {
+            Some(i) => i,
+            None => {
+                bucket.push((*n_ids, o));
+                *n_ids += 1;
+                *n_ids - 1
+            }
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------- SequenceMatcher
+
+/// `difflib.SequenceMatcher(None, a, b, autojunk).get_opcodes()`, without the
+/// 'equal' ones, as `(i1, i2, j1, j2)`. Items are ids below `n_ids`.
+fn differing_opcodes(a: &[u32], b: &[u32], n_ids: usize, autojunk: bool) -> Vec<(usize, usize, usize, usize)> {
+    let mut b2j: Vec<Vec<usize>> = vec![vec![]; n_ids];
+    for (j, &x) in b.iter().enumerate() {
+        b2j[x as usize].push(j);
+    }
+    if autojunk && b.len() >= 200 {
+        let ntest = b.len() / 100 + 1;
+        for idxs in &mut b2j {
+            if idxs.len() > ntest {
+                idxs.clear(); // popular
+            }
+        }
+    }
+
+    let find_longest_match = |alo: usize, ahi: usize, blo: usize, bhi: usize| {
+        let (mut besti, mut bestj, mut bestsize) = (alo, blo, 0);
+        let mut j2len: AHashMap<usize, usize> = AHashMap::new();
+        let mut newj2len: AHashMap<usize, usize> = AHashMap::new();
+        for i in alo..ahi {
+            newj2len.clear();
+            for &j in &b2j[a[i] as usize] {
+                if j < blo {
+                    continue;
+                }
+                if j >= bhi {
+                    break;
+                }
+                let k = if j == 0 { 0 } else { j2len.get(&(j - 1)).copied().unwrap_or(0) } + 1;
+                newj2len.insert(j, k);
+                if k > bestsize {
+                    (besti, bestj, bestsize) = (i + 1 - k, j + 1 - k, k);
+                }
+            }
+            std::mem::swap(&mut j2len, &mut newj2len);
+        }
+        // there is no junk, so only this extension applies
+        while besti > alo && bestj > blo && a[besti - 1] == b[bestj - 1] {
+            (besti, bestj, bestsize) = (besti - 1, bestj - 1, bestsize + 1);
+        }
+        while besti + bestsize < ahi && bestj + bestsize < bhi && a[besti + bestsize] == b[bestj + bestsize] {
+            bestsize += 1;
+        }
+        (besti, bestj, bestsize)
+    };
+
+    let (la, lb) = (a.len(), b.len());
+    let mut queue = vec![(0, la, 0, lb)];
+    let mut blocks = vec![];
+    while let Some((alo, ahi, blo, bhi)) = queue.pop() {
+        let (i, j, k) = find_longest_match(alo, ahi, blo, bhi);
+        if k > 0 {
+            blocks.push((i, j, k));
+            if alo < i && blo < j {
+                queue.push((alo, i, blo, j));
+            }
+            if i + k < ahi && j + k < bhi {
+                queue.push((i + k, ahi, j + k, bhi));
+            }
+        }
+    }
+    blocks.sort_unstable();
+    blocks.push((la, lb, 0));
+
+    // adjacent blocks only matter for the 'equal' opcodes, which are dropped
+    let (mut i, mut j) = (0, 0);
+    let mut runs = vec![];
+    for (ai, bj, size) in blocks {
+        if i < ai || j < bj {
+            runs.push((i, ai, j, bj));
+        }
+        (i, j) = (ai + size, bj + size);
+    }
+    runs
 }
 
 // ---------------------------------------------------------------- diff
@@ -276,8 +646,8 @@ enum OpKind {
 
 struct Op<'py> {
     kind: OpKind,
-    path: Path<'py>,
-    from: Option<Path<'py>>,
+    path: Loc<'py>,
+    from: Option<Loc<'py>>,
     value: Option<Bound<'py, PyAny>>,
     prev: usize,
     next: usize,
@@ -286,67 +656,198 @@ struct Op<'py> {
 const ST_ADD: usize = 0;
 const ST_REMOVE: usize = 1;
 
+/// Up to which product of their lengths two lists have all equal items matched up.
+const EXACT_MATCH_LIMIT: u128 = 500 * 500;
+
 struct Builder<'py> {
-    py: Python<'py>,
     /// doubly linked list of operations; node 0 is the sentinel
     ops: Vec<Op<'py>>,
-    /// `(value, type(value))` -> slot in `slots`, for hashable values
-    storage: [Bound<'py, PyDict>; 2],
-    slots: [Vec<Vec<usize>>; 2],
-    /// unhashable values, searched linearly like jsonpatch does
-    storage2: [Vec<(Bound<'py, PyAny>, usize)>; 2],
+    /// move key -> nodes of the operations that add (or remove) such a value
+    storage: [AHashMap<Vec<u8>, Vec<usize>>; 2],
+    /// the array at each location
+    arrays: AHashMap<Loc<'py>, usize>,
+    array_data: Vec<Array>,
+    items: Vec<Item>,
     path: Path<'py>,
 }
 
 impl<'py> Builder<'py> {
-    fn new(py: Python<'py>) -> Self {
+    fn new() -> Self {
         let root = Op { kind: OpKind::Add, path: vec![], from: None, value: None, prev: 0, next: 0 };
         Builder {
-            py,
             ops: vec![root],
-            storage: [PyDict::new(py), PyDict::new(py)],
-            slots: [vec![], vec![]],
-            storage2: [vec![], vec![]],
+            storage: [AHashMap::new(), AHashMap::new()],
+            arrays: AHashMap::new(),
+            array_data: vec![],
+            items: vec![],
             path: vec![],
         }
     }
 
-    fn typed_key(&self, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        Ok(PyTuple::new(self.py, [value.clone(), value.get_type().into_any()])?.into_any())
+    // ------------------------------------------------ _ArrayItems
+
+    fn new_item(&mut self, array: usize, label: i64, initial: bool) -> usize {
+        self.items.push(Item { array, label, initial });
+        self.items.len() - 1
     }
 
-    fn store_index(&mut self, value: &Bound<'py, PyAny>, node: usize, st: usize) -> PyResult<()> {
-        let key = self.typed_key(value)?;
-        match self.storage[st].get_item(&key) {
-            Ok(Some(slot)) => self.slots[st][slot.extract::<usize>()?].push(node),
-            Ok(None) => {
-                self.storage[st].set_item(&key, self.slots[st].len())?;
-                self.slots[st].push(vec![node]);
+    /// `_ArrayItems.at`
+    fn at(&mut self, a: usize, index: usize) -> usize {
+        while self.array_data[a].present.len() <= index {
+            let label = self.array_data[a].labels.last().map_or(0, |l| l + LABEL_GAP);
+            let item = self.new_item(a, label, true);
+            let arr = &mut self.array_data[a];
+            arr.items.push(item);
+            arr.labels.push(label);
+            arr.present.push(item);
+            arr.present_labels.push(label);
+        }
+        self.array_data[a].present[index]
+    }
+
+    /// `_ArrayItems.insert`
+    fn insert_item(&mut self, a: usize, index: usize) -> usize {
+        let mut position = 0;
+        if index > 0 {
+            let before = self.at(a, index - 1);
+            let before = self.items[before].label;
+            position = self.array_data[a].labels.partition_point(|&l| l <= before);
+        }
+        let n = self.array_data[a].labels.len();
+        let label = if position == 0 || position == n {
+            let labels = &self.array_data[a].labels;
+            if labels.is_empty() {
+                0
+            } else if position == 0 {
+                labels[0] - LABEL_GAP
+            } else {
+                labels[n - 1] + LABEL_GAP
             }
-            Err(e) if e.is_instance_of::<PyTypeError>(self.py) => self.storage2[st].push((key, node)),
-            Err(e) => return Err(e),
+        } else {
+            if self.array_data[a].labels[position] - self.array_data[a].labels[position - 1] < 2 {
+                self.relabel(a);
+            }
+            let labels = &self.array_data[a].labels;
+            let (low, high) = (labels[position - 1], labels[position]);
+            low + LABEL_STEP.min((high - low) / 2)
+        };
+        let item = self.new_item(a, label, false);
+        let arr = &mut self.array_data[a];
+        arr.items.insert(position, item);
+        arr.labels.insert(position, label);
+        self.add_present(item);
+        item
+    }
+
+    fn relabel(&mut self, a: usize) {
+        let arr = &mut self.array_data[a];
+        arr.labels = (0..arr.items.len() as i64).map(|i| i * LABEL_GAP).collect();
+        for (&item, &label) in arr.items.iter().zip(&arr.labels) {
+            self.items[item].label = label;
+        }
+        arr.present_labels = arr.present.iter().map(|&i| self.items[i].label).collect();
+    }
+
+    fn add_present(&mut self, item: usize) {
+        let label = self.items[item].label;
+        let arr = &mut self.array_data[self.items[item].array];
+        let position = arr.present_labels.partition_point(|&l| l < label);
+        arr.present.insert(position, item);
+        arr.present_labels.insert(position, label);
+    }
+
+    fn remove_present(&mut self, item: usize) -> R<()> {
+        let label = self.items[item].label;
+        let arr = &mut self.array_data[self.items[item].array];
+        let position = arr.present_labels.partition_point(|&l| l < label);
+        if position >= arr.present.len() {
+            return Err(Fail::Unsupported); // jsonpatch raises IndexError
+        }
+        arr.present.remove(position);
+        arr.present_labels.remove(position);
+        Ok(())
+    }
+
+    /// `_ArrayItem.index`
+    fn index_of(&self, item: usize) -> i64 {
+        let label = self.items[item].label;
+        self.array_data[self.items[item].array].present_labels.partition_point(|&l| l < label) as i64
+    }
+
+    // ------------------------------------------------ locations
+
+    fn array_at(&mut self, loc: &[LPart<'py>]) -> usize {
+        if let Some(&a) = self.arrays.get(loc) {
+            return a;
+        }
+        self.array_data.push(Array::default());
+        let a = self.array_data.len() - 1;
+        self.arrays.insert(loc.to_vec(), a);
+        a
+    }
+
+    /// `_location`
+    fn location(&mut self, parts: &[Part<'py>]) -> Loc<'py> {
+        let mut loc = Vec::with_capacity(parts.len());
+        for part in parts {
+            loc.push(match part {
+                Part::Key(k) => LPart::Key(k.clone()),
+                Part::Idx(i) => {
+                    let a = self.array_at(&loc);
+                    LPart::Item(self.at(a, *i as usize))
+                }
+            });
+        }
+        loc
+    }
+
+    /// `_new_location`
+    fn new_location(&mut self, key: Part<'py>) -> Loc<'py> {
+        let path = self.path.clone();
+        let mut loc = self.location(&path);
+        loc.push(match key {
+            Part::Key(k) => LPart::Key(k),
+            Part::Idx(i) => {
+                let a = self.array_at(&loc);
+                LPart::Item(self.insert_item(a, i as usize))
+            }
+        });
+        loc
+    }
+
+    /// `_parts`
+    fn parts(&self, loc: &[LPart<'py>]) -> Path<'py> {
+        loc.iter()
+            .map(|p| match p {
+                LPart::Key(k) => Part::Key(k.clone()),
+                LPart::Item(i) => Part::Idx(self.index_of(*i)),
+            })
+            .collect()
+    }
+
+    /// `_set_present`
+    fn set_present(&mut self, loc: &[LPart<'py>], present: bool) -> R<()> {
+        if let Some(&LPart::Item(item)) = loc.last() {
+            if present {
+                self.add_present(item);
+            } else {
+                self.remove_present(item)?;
+            }
         }
         Ok(())
     }
 
-    fn take_index(&mut self, value: &Bound<'py, PyAny>, st: usize) -> PyResult<Option<usize>> {
-        let key = self.typed_key(value)?;
-        match self.storage[st].get_item(&key) {
-            Ok(Some(slot)) => Ok(self.slots[st][slot.extract::<usize>()?].pop()),
-            Ok(None) => Ok(None),
-            Err(e) if e.is_instance_of::<PyTypeError>(self.py) => {
-                for i in (0..self.storage2[st].len()).rev() {
-                    if self.storage2[st][i].0.eq(&key)? {
-                        return Ok(Some(self.storage2[st].remove(i).1));
-                    }
-                }
-                Ok(None)
-            }
-            Err(e) => Err(e),
-        }
+    // ------------------------------------------------ operations
+
+    fn take_index(&mut self, key: &[u8], st: usize) -> Option<usize> {
+        self.storage[st].get_mut(key).and_then(Vec::pop)
     }
 
-    fn insert(&mut self, kind: OpKind, path: Path<'py>, from: Option<Path<'py>>, value: Option<Bound<'py, PyAny>>) -> usize {
+    fn store_index(&mut self, key: Vec<u8>, node: usize, st: usize) {
+        self.storage[st].entry(key).or_default().push(node);
+    }
+
+    fn insert(&mut self, kind: OpKind, path: Loc<'py>, from: Option<Loc<'py>>, value: Option<Bound<'py, PyAny>>) -> usize {
         let id = self.ops.len();
         let last = self.ops[0].prev;
         self.ops.push(Op { kind, path, from, value, prev: last, next: 0 });
@@ -361,52 +862,6 @@ impl<'py> Builder<'py> {
         self.ops[next].prev = prev;
     }
 
-    /// See `DiffBuilder._adjust_following`. Changes are `(node, is_from, new path)`.
-    fn adjust_following(&self, index: usize, removed: bool) -> (Vec<(usize, bool, Path<'py>)>, Path<'py>) {
-        let mut location = self.ops[index].path.clone();
-        let mut changes = vec![];
-        if !location.iter().any(is_int) {
-            return (changes, location);
-        }
-        let mut curr = self.ops[index].next;
-        while curr != 0 {
-            let op = &self.ops[curr];
-            for is_from in [true, false] {
-                let member = if is_from {
-                    match &op.from {
-                        Some(f) => f,
-                        None => continue,
-                    }
-                } else {
-                    &op.path
-                };
-                let inserted = !is_from && matches!(op.kind, OpKind::Add | OpKind::Move);
-                let (parts, present) = if removed {
-                    let p = with_item(member, &location, inserted);
-                    (p.clone(), p)
-                } else {
-                    (without_item(member, &location), member.clone())
-                };
-                if op.kind != OpKind::Replace {
-                    location = item_after(&location, &present, inserted);
-                }
-                changes.push((curr, is_from, parts));
-            }
-            curr = op.next;
-        }
-        (changes, location)
-    }
-
-    fn apply_changes(&mut self, changes: Vec<(usize, bool, Path<'py>)>) {
-        for (node, is_from, parts) in changes {
-            if is_from {
-                self.ops[node].from = Some(parts);
-            } else {
-                self.ops[node].path = parts;
-            }
-        }
-    }
-
     fn joined(&self, key: Part<'py>) -> Path<'py> {
         let mut p = self.path.clone();
         p.push(key);
@@ -414,48 +869,60 @@ impl<'py> Builder<'py> {
     }
 
     fn item_added(&mut self, key: Part<'py>, item: Bound<'py, PyAny>) -> R<()> {
-        let target = self.joined(key);
-        if let Some(index) = self.take_index(&item, ST_REMOVE)? {
-            let (changes, source) = self.adjust_following(index, true);
+        let target = self.joined(key.clone());
+        let mkey = move_key(&item)?;
+        if let Some(index) = self.take_index(&mkey, ST_REMOVE) {
+            let removed = self.ops[index].path.clone();
+            // where the removed item is if it is not removed
+            let source = self.parts(&removed);
+            // RFC 6902 does not allow moving a value into its own children
             if !is_inside(&target, &source) {
-                self.apply_changes(changes);
                 self.remove(index);
                 if source != target {
-                    self.insert(OpKind::Move, target, Some(source), None);
+                    let to = self.new_location(key);
+                    self.insert(OpKind::Move, to, Some(removed), None);
+                } else {
+                    self.set_present(&removed, true)?;
                 }
                 return Ok(());
             }
         }
-        let node = self.insert(OpKind::Add, target, None, Some(item.clone()));
-        self.store_index(&item, node, ST_ADD)?;
+        let to = self.new_location(key);
+        let node = self.insert(OpKind::Add, to, None, Some(item));
+        self.store_index(mkey, node, ST_ADD);
         Ok(())
     }
 
     fn item_removed(&mut self, key: Part<'py>, item: Bound<'py, PyAny>) -> R<()> {
         let source = self.joined(key);
-        if let Some(index) = self.take_index(&item, ST_ADD)? {
-            let (changes, added) = self.adjust_following(index, false);
-            let moved_from = without_item(&source, &added);
-            let target = item_after(&added, &source, false);
-            if !is_inside(&target, &moved_from) {
-                self.apply_changes(changes);
-                self.remove(index);
-                if moved_from != target {
-                    self.insert(OpKind::Move, target, Some(moved_from), None);
-                }
-                return Ok(());
+        let location = self.location(&source);
+        let mkey = move_key(&item)?;
+        if let Some(index) = self.take_index(&mkey, ST_ADD) {
+            let added_location = self.ops[index].path.clone();
+            let added = self.parts(&added_location);
+            self.remove(index);
+            if without_item(&source, &added) != added {
+                self.set_present(&location, false)?;
+                self.insert(OpKind::Move, added_location, Some(location), None);
+            } else {
+                // the removed item stays where the added one would be
+                self.set_present(&added_location, false)?;
             }
+            return Ok(());
         }
-        let node = self.insert(OpKind::Remove, source, None, None);
-        self.store_index(&item, node, ST_REMOVE)?;
+        self.set_present(&location, false)?;
+        let node = self.insert(OpKind::Remove, location, None, None);
+        self.store_index(mkey, node, ST_REMOVE);
         Ok(())
     }
 
-    fn key_part(k: &Bound<'py, PyAny>) -> PyResult<Part<'py>> {
-        Ok(Part::Key(match k.cast_exact::<PyString>() {
+    fn key_part(k: &Bound<'py, PyAny>) -> R<Part<'py>> {
+        let s = match k.cast_exact::<PyString>() {
             Ok(s) => s.clone(),
             Err(_) => k.str()?,
-        }))
+        };
+        s.to_str().map_err(|_| Fail::Unsupported)?;
+        Ok(Part::Key(s))
     }
 
     fn compare_dicts(&mut self, src: &Bound<'py, PyDict>, dst: &Bound<'py, PyDict>) -> R<()> {
@@ -488,15 +955,84 @@ impl<'py> Builder<'py> {
         Ok(())
     }
 
+    /// `_differing_runs`
+    fn differing_runs(src: &[Bound<'py, PyAny>], dst: &[Bound<'py, PyAny>]) -> R<Vec<(usize, usize, usize, usize)>> {
+        // Only what is between the common start and end is matched up
+        let shorter = src.len().min(dst.len());
+        let mut start = 0;
+        while start < shorter && same_json(&src[start], &dst[start], 0)? {
+            start += 1;
+        }
+        let mut common_end = 0;
+        while common_end < shorter - start && same_json(&src[src.len() - 1 - common_end], &dst[dst.len() - 1 - common_end], 0)? {
+            common_end += 1;
+        }
+        let (src_end, dst_end) = (src.len() - common_end, dst.len() - common_end);
+
+        // Equal ids for items with equal move keys
+        let rs = ahash::RandomState::with_seeds(1, 2, 3, 4);
+        let mut buckets = AHashMap::new();
+        let mut n_ids = 0;
+        let mid_src = intern(&src[start..src_end], &mut buckets, &mut n_ids, &rs)?;
+        let mid_dst = intern(&dst[start..dst_end], &mut buckets, &mut n_ids, &rs)?;
+        let n_ids = n_ids as usize;
+        // keys by index into src/dst; only the middle is ever read
+        let src_key = |i: usize| mid_src[i - start];
+        let dst_key = |j: usize| mid_dst[j - start];
+
+        let cost = |(i1, i2, j1, j2): (usize, usize, usize, usize)| -> PyResult<u64> {
+            let mut c = (i2 - i1).abs_diff(j2 - j1) as u64;
+            for (i, j) in (i1..i2).zip(j1..j2) {
+                if src_key(i) != dst_key(j) {
+                    c += positional_cost(&src[i], &dst[j])?;
+                }
+            }
+            Ok(c)
+        };
+
+        let by_position = (start, src_end, start, dst_end);
+        let position_cost = cost(by_position)?;
+
+        let exact = ((src_end - start) as u128) * ((dst_end - start) as u128) <= EXACT_MATCH_LIMIT;
+        if !exact {
+            let mut counts = vec![0u64; n_ids];
+            for &k in &mid_dst {
+                counts[k as usize] += 1;
+            }
+            let comparisons: u128 = mid_src.iter().map(|&k| counts[k as usize] as u128).sum();
+            if comparisons > EXACT_MATCH_LIMIT.max((position_cost as u128).pow(2)) {
+                return Ok(vec![by_position]);
+            }
+        }
+
+        let runs: Vec<_> = differing_opcodes(&mid_src, &mid_dst, n_ids, !exact)
+            .into_iter()
+            .map(|(i1, i2, j1, j2)| (start + i1, start + i2, start + j1, start + j2))
+            .collect();
+
+        let mut total = 0;
+        for &run in &runs {
+            total += cost(run)?;
+        }
+        if total > position_cost {
+            return Ok(vec![by_position]);
+        }
+        Ok(runs)
+    }
+
     fn compare_lists(&mut self, src: &Bound<'py, PyList>, dst: &Bound<'py, PyList>) -> R<()> {
         if self.path.len() > MAX_DEPTH {
             return Err(Fail::Unsupported);
         }
-        let (len_src, len_dst) = (src.len(), dst.len());
-        for key in 0..len_src.max(len_dst) {
-            if key < len_src.min(len_dst) {
-                let (old, new) = (src.get_item(key)?, dst.get_item(key)?);
-                match (kind(&old), kind(&new)) {
+        let src: Vec<_> = src.iter().collect();
+        let dst: Vec<_> = dst.iter().collect();
+        // The list has become dst[:j1] + src[i1:] when a run is compared, so src[i1]
+        // is at index j1
+        for (i1, i2, j1, j2) in Self::differing_runs(&src, &dst)? {
+            let paired = (i2 - i1).min(j2 - j1);
+            for key in j1..j1 + paired {
+                let (old, new) = (&src[i1 + key - j1], &dst[key]);
+                match (kind(old), kind(new)) {
                     (Kind::Dict, Kind::Dict) => {
                         self.path.push(Part::Idx(key as i64));
                         self.compare_dicts(old.cast()?, new.cast()?)?;
@@ -507,16 +1043,18 @@ impl<'py> Builder<'py> {
                         self.compare_lists(old.cast()?, new.cast()?)?;
                         self.path.pop();
                     }
-                    _ if json_eq(&old, &new, self.path.len())? => {}
+                    _ if json_eq(old, new, self.path.len())? => {}
                     _ => {
-                        self.item_removed(Part::Idx(key as i64), old)?;
-                        self.item_added(Part::Idx(key as i64), new)?;
+                        self.item_removed(Part::Idx(key as i64), old.clone())?;
+                        self.item_added(Part::Idx(key as i64), new.clone())?;
                     }
                 }
-            } else if len_src > len_dst {
-                self.item_removed(Part::Idx(len_dst as i64), src.get_item(key)?)?;
-            } else {
-                self.item_added(Part::Idx(key as i64), dst.get_item(key)?)?;
+            }
+            for old in &src[i1 + paired..i2] {
+                self.item_removed(Part::Idx((j1 + paired) as i64), old.clone())?;
+            }
+            for key in j1 + paired..j2 {
+                self.item_added(Part::Idx(key as i64), dst[key].clone())?;
             }
         }
         Ok(())
@@ -541,52 +1079,84 @@ impl<'py> Builder<'py> {
             }
             _ if json_eq(src, dst, self.path.len())? => Ok(()),
             _ => {
-                let path = match key {
+                let parts = match key {
                     Some(k) => self.joined(k),
                     None => self.path.clone(),
                 };
-                self.insert(OpKind::Replace, path, None, Some(dst.clone()));
+                let loc = self.location(&parts);
+                self.insert(OpKind::Replace, loc, None, Some(dst.clone()));
                 Ok(())
             }
         }
     }
 
-    /// See `DiffBuilder.execute`: emit operation dicts, merging remove+add into replace.
-    fn execute(&self) -> R<Bound<'py, PyList>> {
-        let py = self.py;
-        let out = PyList::empty(py);
+    /// `_replay`: the operations with the array indices at which they apply.
+    fn replay(&mut self) -> R<Vec<(OpKind, Path<'py>, Option<Path<'py>>, Option<Bound<'py, PyAny>>)>> {
+        for a in 0..self.array_data.len() {
+            let present: Vec<usize> = self.array_data[a].items.iter().copied().filter(|&i| self.items[i].initial).collect();
+            self.array_data[a].present_labels = present.iter().map(|&i| self.items[i].label).collect();
+            self.array_data[a].present = present;
+        }
+        let mut out = vec![];
         let mut curr = self.ops[0].next;
         while curr != 0 {
-            let op = &self.ops[curr];
+            // 'from' is removed before 'path' is added
+            let from = self.ops[curr].from.clone();
+            let from_parts = match &from {
+                Some(f) => {
+                    let p = self.parts(f);
+                    self.set_present(f, false)?;
+                    Some(p)
+                }
+                None => None,
+            };
+            let path = self.ops[curr].path.clone();
+            let parts = self.parts(&path);
+            match self.ops[curr].kind {
+                OpKind::Remove => self.set_present(&path, false)?,
+                OpKind::Add | OpKind::Move => self.set_present(&path, true)?,
+                OpKind::Replace => {}
+            }
+            out.push((self.ops[curr].kind, parts, from_parts, self.ops[curr].value.clone()));
+            curr = self.ops[curr].next;
+        }
+        Ok(out)
+    }
+
+    /// See `DiffBuilder.execute`: emit operation dicts, merging remove+add into replace.
+    fn execute(&mut self, py: Python<'py>) -> R<Bound<'py, PyList>> {
+        let ops = self.replay()?;
+        let out = PyList::empty(py);
+        let mut i = 0;
+        while i < ops.len() {
             let d = PyDict::new(py);
-            let next = op.next;
-            if next != 0 {
-                let second = &self.ops[next];
-                if op.kind == OpKind::Remove && second.kind == OpKind::Add && op.path == second.path {
+            let (kind, path, from, value) = &ops[i];
+            if let Some((OpKind::Add, path2, _, value2)) = ops.get(i + 1) {
+                if *kind == OpKind::Remove && path == path2 {
                     d.set_item(intern!(py, "op"), intern!(py, "replace"))?;
-                    d.set_item(intern!(py, "path"), to_pointer(&second.path)?)?;
-                    d.set_item(intern!(py, "value"), second.value.as_ref().unwrap())?;
+                    d.set_item(intern!(py, "path"), to_pointer(path2))?;
+                    d.set_item(intern!(py, "value"), value2.as_ref().unwrap())?;
                     out.append(d)?;
-                    curr = second.next;
+                    i += 2;
                     continue;
                 }
             }
-            let name = match op.kind {
+            let name = match kind {
                 OpKind::Add => intern!(py, "add"),
                 OpKind::Remove => intern!(py, "remove"),
                 OpKind::Replace => intern!(py, "replace"),
                 OpKind::Move => intern!(py, "move"),
             };
             d.set_item(intern!(py, "op"), name)?;
-            if let Some(from) = &op.from {
-                d.set_item(intern!(py, "from"), to_pointer(from)?)?;
+            if let Some(from) = from {
+                d.set_item(intern!(py, "from"), to_pointer(from))?;
             }
-            d.set_item(intern!(py, "path"), to_pointer(&op.path)?)?;
-            if let Some(v) = &op.value {
+            d.set_item(intern!(py, "path"), to_pointer(path))?;
+            if let Some(v) = value {
                 d.set_item(intern!(py, "value"), v)?;
             }
             out.append(d)?;
-            curr = next;
+            i += 1;
         }
         Ok(out)
     }
@@ -596,8 +1166,8 @@ impl<'py> Builder<'py> {
 /// would produce them; `None` when the reference implementation must be used.
 #[pyfunction]
 fn diff<'py>(py: Python<'py>, src: &Bound<'py, PyAny>, dst: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyList>>> {
-    let mut b = Builder::new(py);
-    match b.compare_values(None, src, dst).and_then(|_| b.execute()) {
+    let mut b = Builder::new();
+    match b.compare_values(None, src, dst).and_then(|_| b.execute(py)) {
         Ok(ops) => Ok(Some(ops)),
         Err(Fail::Unsupported) => Ok(None),
         Err(Fail::Py(e)) => Err(e),
@@ -788,7 +1358,7 @@ fn slot_value<'py>(s: &Slot<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
 /// `AddOperation._add`; `None` when jsonpatch must handle it (nothing was mutated).
 fn add_fast<'py>(obj: &Bound<'py, PyAny>, parts: &[String], value: Bound<'py, PyAny>) -> PyResult<Result<Bound<'py, PyAny>, Bound<'py, PyAny>>> {
     if parts.is_empty() {
-        return Ok(if matches!(kind(obj), Kind::Dict | Kind::List) { Ok(value) } else { Err(value) });
+        return Ok(Ok(value)); // the root is replaced, whatever its type
     }
     match slot(obj, parts)? {
         Some(Slot::Key(d, k)) => d.set_item(k, value)?,
@@ -835,9 +1405,6 @@ impl<'py> Applier<'_, 'py> {
                 if parts.is_empty() {
                     return Ok(Some(deepcopy(&v)?));
                 }
-                if parts.last().is_some_and(|p| p == "-") {
-                    return Ok(None); // jsonpatch rejects "-" here even for a dict key
-                }
                 let Some(s) = slot(obj, parts)? else { return Ok(None) };
                 if slot_value(&s)?.is_none() {
                     return Ok(None);
@@ -870,7 +1437,7 @@ impl<'py> Applier<'_, 'py> {
                     v
                 };
                 let Some(expected) = value()? else { return Ok(None) };
-                Ok(if actual.ne(&expected)? { None } else { Some(obj.clone()) })
+                Ok(if json_equal(&actual, &expected, 0)? { Some(obj.clone()) } else { None })
             }
             Verb::Move => {
                 let Some(from) = str_pointer(d, intern!(py, "from"))? else { return Ok(None) };
@@ -882,7 +1449,7 @@ impl<'py> Applier<'_, 'py> {
                 if from == parts {
                     return Ok(Some(obj.clone()));
                 }
-                if matches!(s, Slot::Key(..)) && parts.starts_with(&from) {
+                if parts.starts_with(&from) {
                     return Ok(None); // "Cannot move values into their own children"
                 }
                 remove_slot(s)?;
@@ -901,6 +1468,45 @@ impl<'py> Applier<'_, 'py> {
                 Ok(Some(self.add(obj, d, parts, v)?))
             }
         }
+    }
+}
+
+/// `_json_equal` (bools equal only bools) for dicts, lists and scalars; false for
+/// anything else, which jsonpatch then compares.
+fn json_equal(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, depth: usize) -> PyResult<bool> {
+    if depth > MAX_DEPTH {
+        return Ok(false);
+    }
+    match (kind(a), kind(b)) {
+        (Kind::Bool, Kind::Bool) => Ok(a.is(b)),
+        (Kind::Bool, _) | (_, Kind::Bool) => Ok(false),
+        (Kind::Dict, Kind::Dict) => {
+            let (x, y) = (a.cast::<PyDict>()?, b.cast::<PyDict>()?);
+            if x.len() != y.len() {
+                return Ok(false);
+            }
+            for (k, v) in x.iter() {
+                match y.get_item(&k)? {
+                    Some(w) if json_equal(&v, &w, depth + 1)? => {}
+                    _ => return Ok(false),
+                }
+            }
+            Ok(true)
+        }
+        (Kind::List, Kind::List) => {
+            let (x, y) = (a.cast::<PyList>()?, b.cast::<PyList>()?);
+            if x.len() != y.len() {
+                return Ok(false);
+            }
+            for (v, w) in x.iter().zip(y.iter()) {
+                if !json_equal(&v, &w, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (Kind::Dict | Kind::List | Kind::Other, _) | (_, Kind::Dict | Kind::List | Kind::Other) => Ok(false),
+        _ => a.eq(b),
     }
 }
 

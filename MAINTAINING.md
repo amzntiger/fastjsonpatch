@@ -2,7 +2,7 @@
 
 ## What the package is
 
-- `python/fastjsonpatch/__init__.py`: jsonpatch 1.34's module (BSD, notice kept), with
+- `python/fastjsonpatch/__init__.py`: jsonpatch 1.35's module (BSD, notice kept), with
   `JsonPatch.__init__`, `from_diff` and `apply` routed to the Rust core when they can
   be reproduced exactly. Everything else is jsonpatch's code, unchanged.
 - `src/lib.rs`: the Rust core (PyO3). `diff` ports `DiffBuilder`; `apply` runs
@@ -12,13 +12,13 @@
   reference the parity tests compare against.
 
 **The rule:** fastjsonpatch must return the same patches, documents and exceptions as
-jsonpatch 1.34. A behaviour difference is a bug, unless it is listed in the README.
+jsonpatch 1.35. A behaviour difference is a bug, unless it is listed in the README.
 
 ## Tests
 
 ```sh
 maturin develop --release
-pip install "jsonpatch==1.34" pytest
+pip install "jsonpatch==1.35" pytest
 pytest tests                 # ~1580 tests, a few seconds
 python bench/compare.py      # speed vs jsonpatch
 ```

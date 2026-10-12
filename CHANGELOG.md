@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+Now matches jsonpatch 1.35 instead of 1.34: the same patches, documents and exceptions.
+Code written against 0.1.x can see different results:
+
+- `make_patch` matches up equal items of two lists before comparing them, so a value
+  inserted or removed in the middle of a list is one `add` or `remove` instead of a
+  change to every item after it (e.g. 259 instead of 283 operations for the
+  Kubernetes OpenAPI v1.33 → v1.34 diff). Moves are detected by JSON value, so `1`
+  is not moved where `true` is added, and objects match regardless of key order.
+- `test` compares like RFC 6902: `1` and `true` are different.
+- `replace` with the path `/-` on an object replaces its `"-"` member.
+- `add` with the path `""` replaces any document, not only objects and arrays.
+- New error messages for removing the whole document, moving an array item into
+  itself or its children, `from` ending in `-` for an array, a `from` that is not a
+  string, and an operation that is not an object.
+- Operations with arrays or objects as values can be hashed; operations with `1` and
+  `true` as values are no longer equal.
+- Requires `jsonpointer` 3.2 or later (like jsonpatch 1.35).
+- `make_patch` is slower than in 0.1.4 on large lists (10.9 ms instead of 5.3 ms for
+  10k records with 100 edits), as matching up items takes time; it is still about
+  15x faster than jsonpatch 1.35.
+
 ## 0.1.4 (2026-10-12)
 
 - `import fastjsonpatch` takes about 11 ms instead of about 53 ms: `__version__` now

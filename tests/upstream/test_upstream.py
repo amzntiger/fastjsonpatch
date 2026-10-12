@@ -1,6 +1,7 @@
-# jsonpatch 1.34's own test suite (tests.py from the jsonpatch sdist), run against
-# fastjsonpatch. Changes from upstream: the import below, and tests.js is read from
-# this file's directory.
+# jsonpatch 1.35's own test suite (tests.py from the jsonpatch sdist), run against
+# fastjsonpatch. Changes from upstream: the import below, tests.js is read from this
+# file's directory, and CommandLineTests (jsonpatch's CLI, which fastjsonpatch does
+# not ship) is left out.
 #
 # Copyright (c) 2011 Stefan Kögl <stefan@skoegl.net>, BSD license (see ../../LICENSE).
 #!/usr/bin/env python
@@ -13,8 +14,14 @@ import doctest
 import unittest
 import fastjsonpatch as jsonpatch
 import jsonpointer
+import random
 import sys
+import os
+import stat
+import subprocess
+import tempfile
 from types import MappingProxyType
+from unittest import mock
 
 
 class ApplyPatchTestCase(unittest.TestCase):
@@ -22,17 +29,22 @@ class ApplyPatchTestCase(unittest.TestCase):
     def test_js_file(self):
         with open(__import__('os').path.join(__import__('os').path.dirname(__file__), 'tests.js'), 'r') as f:
             tests = json.load(f)
-            for test in tests:
-                try:
-                    if 'expected' not in test:
+        for test in tests:
+            with self.subTest(comment=test.get('comment'), patch=test['patch']):
+                if 'error' in test:
+                    # json.load keeps only the last of duplicate members, so
+                    # the patch of the disabled "duplicate ops" test is valid
+                    if test.get('disabled'):
                         continue
+                    self.assertRaises(
+                        (jsonpatch.JsonPatchException,
+                         jsonpointer.JsonPointerException),
+                        jsonpatch.apply_patch, test['doc'], test['patch'])
+                else:
+                    # without 'expected', the patch only has to apply
                     result = jsonpatch.apply_patch(test['doc'], test['patch'])
-                    self.assertEqual(result, test['expected'])
-                except Exception:
-                    if test.get('error'):
-                        continue
-                    else:
-                        raise
+                    if 'expected' in test:
+                        self.assertEqual(result, test['expected'])
 
     def test_success_if_replaced_dict(self):
         src = [{'a': 1}, {'b': 2}]
@@ -92,11 +104,38 @@ class ApplyPatchTestCase(unittest.TestCase):
         with self.assertRaises(jsonpointer.JsonPointerException):
             jsonpatch.apply_patch(obj, [{'op': 'remove', 'path': '/foo/-'}])
 
+    def test_move_copy_from_end_of_list(self):
+        # '-' refers to the nonexistent element after the last one, #215
+        obj = {'foo': ['bar', 'qux', 'baz']}
+        for op in ('move', 'copy'):
+            with self.assertRaises(jsonpointer.JsonPointerException):
+                jsonpatch.apply_patch(obj, [{'op': op, 'from': '/foo/-', 'path': '/foo/0'}])
+
+    def test_move_copy_from_dash_object_key(self):
+        # '-' is an ordinary key in objects
+        obj = {'-': 1}
+        res = jsonpatch.apply_patch(obj, [{'op': 'copy', 'from': '/-', 'path': '/a'}])
+        self.assertEqual(res, {'-': 1, 'a': 1})
+        res = jsonpatch.apply_patch(obj, [{'op': 'move', 'from': '/-', 'path': '/a'}])
+        self.assertEqual(res, {'a': 1})
 
     def test_replace_object_key(self):
         obj = {'foo': 'bar', 'baz': 'qux'}
         res = jsonpatch.apply_patch(obj, [{'op': 'replace', 'path': '/baz', 'value': 'boo'}])
         self.assertTrue(res['baz'], 'boo')
+
+    def test_replace_object_key_dash(self):
+        # '-' only has a special meaning for arrays (#212)
+        obj = {'foo': {'-': 'bar', 'baz': 'qux'}}
+        res = jsonpatch.apply_patch(obj, [{'op': 'replace', 'path': '/foo/-',
+                                           'value': 'boo'}])
+        self.assertEqual(res, {'foo': {'-': 'boo', 'baz': 'qux'}})
+
+    def test_replace_array_dash(self):
+        obj = {'foo': ['bar', 'qux']}
+        with self.assertRaises(jsonpatch.InvalidJsonPatch):
+            jsonpatch.apply_patch(obj, [{'op': 'replace', 'path': '/foo/-',
+                                         'value': 'boo'}])
 
     def test_replace_whole_document(self):
         obj = {'foo': 'bar'}
@@ -141,6 +180,35 @@ class ApplyPatchTestCase(unittest.TestCase):
             self.fail("root add on an array root should succeed, not raise")
         except TypeError:
             self.fail("root add on an array root raised a bare TypeError")
+
+    def test_whole_document_scalar_root(self):
+        # a JSON document can also be a scalar (#213); operations on the whole
+        # document have to work on it as on an object or array root
+        for obj in (None, True, 5, 1.5, 'foo'):
+            with self.subTest(obj=obj):
+                for op in ('add', 'replace'):
+                    res = jsonpatch.apply_patch(
+                        obj, [{'op': op, 'path': '', 'value': {'baz': 'qux'}}])
+                    self.assertEqual(res, {'baz': 'qux'})
+                for op in ('copy', 'move'):
+                    res = jsonpatch.apply_patch(
+                        obj, [{'op': op, 'from': '', 'path': ''}])
+                    self.assertEqual(res, obj)
+
+    def test_remove_whole_document(self):
+        # there would be no document left, whatever the type of the root
+        for obj in (None, True, 5, 1.5, 'foo', {'foo': 'bar'}, ['foo']):
+            with self.subTest(obj=obj):
+                self.assertRaises(jsonpatch.JsonPatchConflict,
+                                  jsonpatch.apply_patch,
+                                  obj, [{'op': 'remove', 'path': ''}])
+
+    def test_move_whole_document_scalar_root_into_child(self):
+        for obj in (None, 5, 'foo'):
+            with self.subTest(obj=obj):
+                self.assertRaises(jsonpatch.JsonPatchConflict,
+                                  jsonpatch.apply_patch,
+                                  obj, [{'op': 'move', 'from': '', 'path': '/foo'}])
 
     def test_replace_array_item(self):
         obj = {'foo': ['bar', 'qux', 'baz']}
@@ -204,10 +272,16 @@ class ApplyPatchTestCase(unittest.TestCase):
         self.assertEqual(res, {'foo': ['all', 'cows', 'eat', 'grass']})
 
     def test_move_array_item_into_other_item(self):
-        obj = [{"foo": []}, {"bar": []}]
-        patch = [{"op": "move", "from": "/0", "path": "/0/bar/0"}]
-        res = jsonpatch.apply_patch(obj, patch)
-        self.assertEqual(res, [{'bar': [{"foo": []}]}])
+        # https://github.com/stefankoegl/python-json-patch/issues/214
+        # "from" is a proper prefix of "path", which RFC 6902, 4.4 forbids,
+        # even though "path" is inside the other item once "from" is removed
+        for obj, path in [([{"foo": []}, {"bar": []}], "/0/bar/0"),
+                          ([[], []], "/0/0")]:
+            saved = copy.deepcopy(obj)
+            patch = [{"op": "move", "from": "/0", "path": path}]
+            self.assertRaises(jsonpatch.JsonPatchConflict,
+                              jsonpatch.apply_patch, obj, patch)
+            self.assertEqual(obj, saved)
 
     def test_copy_object_keyerror(self):
         obj = {'foo': {'bar': 'baz'},
@@ -291,6 +365,23 @@ class ApplyPatchTestCase(unittest.TestCase):
                           jsonpatch.apply_patch,
                           obj, [{'op': 'test', 'path': '/bar', 'value': 'bar'}])
 
+    def test_test_numbers_by_value(self):
+        obj = {'a': 1, 'b': [0.0], 'c': {'d': 2}}
+        jsonpatch.apply_patch(obj, [{'op': 'test', 'path': '/a', 'value': 1.0},
+                                    {'op': 'test', 'path': '/b', 'value': [0]},
+                                    {'op': 'test', 'path': '/c', 'value': {'d': 2.0}}])
+
+    def test_test_literals_differ_from_numbers(self):
+        # RFC 6902, 4.6: true and false are only equal to themselves, #216
+        for doc, value in [({'a': 1}, True),
+                           ({'a': [1]}, [True]),
+                           ({'a': {'a': 0}}, {'a': False}),
+                           ({'a': True}, 1),
+                           ({'a': False}, 0)]:
+            with self.assertRaises(jsonpatch.JsonPatchTestFailed):
+                jsonpatch.apply_patch(
+                    doc, [{'op': 'test', 'path': '/a', 'value': value}])
+
 
     def test_test_not_existing(self):
         obj =  {'bar': 'qux'}
@@ -366,6 +457,17 @@ class EqualityTestCase(unittest.TestCase):
         patch2 = jsonpatch.JsonPatch([{'op': 'test', 'path': '/test1'}])
         self.assertNotEqual(patch1, patch2)
 
+    def test_patch_unequal_literal_and_number(self):
+        # the patches behave differently, #216
+        patch1 = jsonpatch.JsonPatch([{'op': 'test', 'path': '/a', 'value': 1}])
+        patch2 = jsonpatch.JsonPatch([{'op': 'test', 'path': '/a', 'value': True}])
+        self.assertNotEqual(patch1, patch2)
+
+    def test_patch_equal_numbers_by_value(self):
+        patch1 = jsonpatch.JsonPatch([{'op': 'test', 'path': '/a', 'value': [1]}])
+        patch2 = jsonpatch.JsonPatch([{'op': 'test', 'path': '/a', 'value': [1.0]}])
+        self.assertEqual(patch1, patch2)
+
     def test_patch_hash_equality(self):
         patch1 = jsonpatch.JsonPatch([{ "op": "add", "path": "/a/b/c", "value": "foo" }])
         patch2 = jsonpatch.JsonPatch([{ "path": "/a/b/c", "op": "add", "value": "foo" }])
@@ -376,6 +478,20 @@ class EqualityTestCase(unittest.TestCase):
         patch1 = jsonpatch.JsonPatch([{'op': 'test', 'path': '/test'}])
         patch2 = jsonpatch.JsonPatch([{'op': 'test', 'path': '/test1'}])
         self.assertNotEqual(hash(patch1), hash(patch2))
+
+
+    def test_patch_hash_container_values(self):
+        for value in ([], {}, [1, {'b': []}], {'b': [1]}):
+            patch1 = jsonpatch.JsonPatch([{'op': 'add', 'path': '/a', 'value': value}])
+            patch2 = jsonpatch.JsonPatch([{'op': 'add', 'path': '/a', 'value': copy.deepcopy(value)}])
+            self.assertEqual(hash(patch1), hash(patch2))
+            self.assertEqual(len({patch1, patch2}), 1)
+
+
+    def test_patch_hash_ignored_container_member(self):
+        # members an operation doesn't use are ignored, whatever their value
+        patch = jsonpatch.JsonPatch([{'op': 'add', 'path': '/a', 'value': 1, 'from': []}])
+        self.assertIn(patch, {patch})
 
 
     def test_patch_neq_other_objs(self):
@@ -486,9 +602,7 @@ class MakePatchTestCase(unittest.TestCase):
                    }
         self.assertEqual(expected, res)
 
-    # TODO: this test is currently disabled, as the optimized patch is
-    # not ideal
-    def _test_should_just_add_new_item_not_rebuild_all_list(self):
+    def test_should_just_add_new_item_not_rebuild_all_list(self):
         src = {'foo': [1, 2, 3]}
         dst = {'foo': [3, 1, 2, 3]}
         patch = list(jsonpatch.make_patch(src, dst))
@@ -502,6 +616,16 @@ class MakePatchTestCase(unittest.TestCase):
         dst = {"x/y": 2}
         patch = jsonpatch.make_patch(src, dst)
         self.assertEqual([{"path": "/x~1y", "value": 2, "op": "replace"}], patch.patch)
+        res = patch.apply(src)
+        self.assertEqual(res, dst)
+
+    def test_issue_94(self):
+        """Keys containing '/' or '~' are escaped as defined in RFC 6901."""
+        src = {}
+        dst = {'/fields/test': '123456', 'a~b': 1}
+        patch = jsonpatch.make_patch(src, dst)
+        paths = sorted(op['path'] for op in patch)
+        self.assertEqual(paths, ['/a~0b', '/~1fields~1test'])
         res = patch.apply(src)
         self.assertEqual(res, dst)
 
@@ -634,6 +758,64 @@ class MakePatchTestCase(unittest.TestCase):
         self.assertEqual(res, dst)
         self.assertIsInstance(res['aaa'][1], bool)
         self.assertIsInstance(res['aaa'][2], bool)
+
+    def test_move_only_values_equal_in_json(self):
+        """[1] and [true] are equal in Python, so the diff moved one to where
+        the other belongs"""
+        cases = [
+            ([[1], [2], [3]], [[2], [3], [True]]),
+            ([{'a': 1}, 2], [2, {'a': True}]),
+            ({'a': [1]}, {'b': [True]}),
+            ({'a': {'x': 1}}, {'b': {'x': True}}),
+            ([[1], 0], [0, [True]]),
+            ({'a': [1]}, {'b': [1.0]}),
+            ({'a': 0.0}, {'b': -0.0}),
+            # member names that are not strings are serialized, too
+            ({'a': {1: 'v'}}, {'b': {True: 'v'}}),
+        ]
+        for src, dst in cases:
+            with self.subTest(src=src, dst=dst):
+                patch = jsonpatch.make_patch(src, dst)
+                res = patch.apply(src)
+                self.assertEqual(json.dumps(res), json.dumps(dst))
+
+    def test_move_only_values_equal_in_given_dumps(self):
+        """The given dumps decides which values are the same"""
+        src = {'a': decimal.Decimal('1.0')}
+        dst = {'b': decimal.Decimal('1.00')}
+        patch = jsonpatch.JsonPatch.from_diff(
+            src, dst, dumps=custom_types_dumps)
+        res = jsonpatch.apply_patch(src, patch)
+        self.assertEqual(str(res['b']), '1.00')
+
+    def test_values_dumps_cannot_serialize(self):
+        """Such values can be added, removed and moved, as they need not be
+        compared"""
+        value = decimal.Decimal('1.5')
+        cases = [
+            ({}, {'a': value}),
+            ([1], [1, value]),
+            ({'a': [value]}, {}),
+            ({'a': value}, {'b': value}),
+        ]
+        for src, dst in cases:
+            with self.subTest(src=src, dst=dst):
+                patch = jsonpatch.make_patch(src, dst)
+                self.assertEqual(patch.apply(src), dst)
+        self.assertEqual(jsonpatch.make_patch(*cases[-1]).patch,
+                         [{'op': 'move', 'from': '/a', 'path': '/b'}])
+
+    def test_values_that_contain_themselves(self):
+        """dumps cannot serialize them either, but they can still be added,
+        removed and moved"""
+        value = []
+        value.append(value)
+        self.assertEqual(jsonpatch.make_patch({}, {'a': value}).patch,
+                         [{'op': 'add', 'path': '/a', 'value': value}])
+        self.assertEqual(jsonpatch.make_patch({'a': [value]}, {'a': []}).patch,
+                         [{'op': 'remove', 'path': '/a/0'}])
+        self.assertEqual(jsonpatch.make_patch({'a': value}, {'b': value}).patch,
+                         [{'op': 'move', 'from': '/a', 'path': '/b'}])
 
     def test_issue119(self):
         """Make sure it avoids casting numeric str dict key to int"""
@@ -784,6 +966,11 @@ class MakePatchTestCase(unittest.TestCase):
             with self.subTest(old=old, new=new):
                 self.assertMakesPatch(old, new)
 
+    def test_issue_212(self):
+        """A changed object member named '-' is replaced, not rejected."""
+        self.assertMakesPatch({'-': 0}, {'-': 1})
+        self.assertMakesPatch({'a': {'-': [1]}}, {'a': {'-': [2]}})
+
     def test_move_with_numeric_object_keys(self):
         """Object keys that look like array indices are not shifted."""
         self.assertMakesPatch({'0': None, 'a': []}, {'1': [], 'a': [None]})
@@ -864,6 +1051,56 @@ class OptimizationTests(unittest.TestCase):
         fn({'foo': [1, 2, 3]}, {'foo': [3, 2, 1]})
         fn([1, 2, 3], [3, 2, 1])
 
+    def test_use_move_regardless_of_member_order(self):
+        src = {'a': {'x': 1, 'y': [True, {}]}}
+        dst = {'b': {'y': [True, {}], 'x': 1}}
+        patch = list(jsonpatch.make_patch(src, dst))
+        self.assertEqual(patch, [{'op': 'move', 'from': '/a', 'path': '/b'}])
+
+    def test_moves_change_indices_of_later_operations(self):
+        src = [1, 2, 3, 4, 5]
+        dst = [5, 4, 3, 2, 1]
+        patch = jsonpatch.make_patch(src, dst)
+        exp = [
+            {'op': 'move', 'from': '/3', 'path': '/0'},
+            {'op': 'move', 'from': '/2', 'path': '/3'},
+            {'op': 'move', 'from': '/4', 'path': '/0'},
+            {'op': 'move', 'from': '/2', 'path': '/4'},
+        ]
+        self.assertEqual(patch.patch, exp)
+        self.assertEqual(patch.apply(src), dst)
+
+    def test_moves_change_indices_in_nested_list(self):
+        src = {'a': [5, {'b': [0, 1, 2]}, 6]}
+        dst = {'a': [6, {'b': [0, 1, 3]}, 5]}
+        patch = jsonpatch.make_patch(src, dst)
+        exp = [
+            {'op': 'replace', 'path': '/a/1/b/2', 'value': 3},
+            {'op': 'move', 'from': '/a/2', 'path': '/a/0'},
+            {'op': 'move', 'from': '/a/1', 'path': '/a/2'},
+        ]
+        self.assertEqual(patch.patch, exp)
+        self.assertEqual(patch.apply(src), dst)
+
+    def test_moves_in_long_list(self):
+        """ This took seconds while each move found changed all operations
+        after it one by one """
+        src = list(range(2000))
+        for dst, length in [(src[::-1], 1999),
+                            (random.Random(2).sample(src, 2000), 1952)]:
+            patch = jsonpatch.make_patch(src, dst)
+            self.assertEqual(len(patch.patch), length)
+            self.assertEqual({op['op'] for op in patch}, {'move'})
+            self.assertEqual(patch.apply(src), dst)
+
+    def test_moves_of_unhashable_values(self):
+        src = {str(i): [i, {'a': i}] for i in range(2000)}
+        dst = {str(i + 2000): [i, {'a': i}] for i in range(2000)}
+        patch = jsonpatch.make_patch(src, dst)
+        self.assertEqual(len(patch.patch), 2000)
+        self.assertEqual({op['op'] for op in patch}, {'move'})
+        self.assertEqual(patch.apply(src), dst)
+
     def test_success_if_replace_inside_dict(self):
         src = [{'a': 1, 'foo': {'b': 2, 'd': 5}}]
         dst = [{'a': 1, 'foo': {'b': 3, 'd': 6}}]
@@ -918,6 +1155,144 @@ class OptimizationTests(unittest.TestCase):
 
         self.assertEqual(patch.patch, exp)
 
+    def assertPatch(self, src, dst, exp):
+        patch = jsonpatch.make_patch(src, dst)
+        self.assertEqual(patch.patch, exp)
+        self.assertEqual(patch.apply(src), dst)
+
+    def test_issue_78_insert_into_list_of_lists(self):
+        """ Inserting an item adds it instead of changing the items that
+        follow """
+        self.assertPatch([[1, 'a']], [[2, 'b'], [1, 'a']],
+                         [{'op': 'add', 'path': '/0', 'value': [2, 'b']}])
+
+    def test_issue_78_insert_into_list_of_objects(self):
+        src = [{'a': i} for i in [1, 3, 4, 5, 6, 7, 8, 9, 10]]
+        dst = [{'a': i} for i in range(1, 11)]
+        self.assertPatch(src, dst,
+                         [{'op': 'add', 'path': '/1', 'value': {'a': 2}}])
+
+    def test_issue_78_remove_from_list_of_objects(self):
+        self.assertPatch([{'a': 1}, {'b': 2}], [{'b': 2}],
+                         [{'op': 'remove', 'path': '/0'}])
+
+    def test_issue_78_separate_changes(self):
+        src = {'foo': [{'a': 1}, {'a': 3}, {'a': 5}, {'a': 6}, [7]]}
+        dst = {'foo': [{'a': 1}, {'a': 2}, {'a': 3}, {'a': 5},
+                       {'a': 6, 'b': 0}, [7]]}
+        self.assertPatch(src, dst, [
+            {'op': 'add', 'path': '/foo/1', 'value': {'a': 2}},
+            {'op': 'add', 'path': '/foo/4/b', 'value': 0},
+        ])
+        self.assertPatch(dst, src, [
+            {'op': 'remove', 'path': '/foo/1'},
+            {'op': 'remove', 'path': '/foo/3/b'},
+        ])
+
+    def test_issue_78_items_equal_by_chance(self):
+        """ Items are compared by position if matching up those that are
+        equal takes more operations """
+        self.assertPatch([1, 2, 3, 5], [1, 3, 3, 4], [
+            {'op': 'replace', 'path': '/1', 'value': 3},
+            {'op': 'replace', 'path': '/3', 'value': 4},
+        ])
+
+    def test_issue_78_items_paired_by_position(self):
+        """ Objects are compared by position if matching up those that are
+        equal pairs up objects that differ in more members """
+        src = [{'x': 'A'}, {'x': 'X'}, {'b1': 'B1', 'b2': 'B2', 'b3': 'B3'}]
+        dst = [{'x': 'X'}, {'x': 'X', 'c': 'C'},
+               {'b1': 'D1', 'b2': 'B2', 'b3': 'B3'}]
+        self.assertPatch(src, dst, [
+            {'op': 'replace', 'path': '/0/x', 'value': 'X'},
+            {'op': 'add', 'path': '/1/c', 'value': 'C'},
+            {'op': 'replace', 'path': '/2/b1', 'value': 'D1'},
+        ])
+
+    def test_issue_78_object_member_order(self):
+        """ Objects are matched up whatever the order of their members """
+        self.assertPatch([{'a': 1, 'b': 2}], [{'x': 0}, {'b': 2, 'a': 1}],
+                         [{'op': 'add', 'path': '/0', 'value': {'x': 0}}])
+
+    def test_issue_78_frequent_items(self):
+        """ Items that occur often in long lists are matched up, too """
+        self.assertPatch([0] * 300, [1] + [0] * 300 + [2], [
+            {'op': 'add', 'path': '/0', 'value': 1},
+            {'op': 'add', 'path': '/301', 'value': 2},
+        ])
+        self.assertPatch(
+            [{} for _ in range(300)],
+            [{'a': 1}] + [{} for _ in range(300)] + [{'b': 2}], [
+                {'op': 'add', 'path': '/0', 'value': {'a': 1}},
+                {'op': 'add', 'path': '/301', 'value': {'b': 2}},
+            ])
+
+    def test_issue_78_items_not_serializable(self):
+        """ Items that cannot be serialized with sorted object members are
+        compared by position """
+        src = [{1: 'a', 'b': 0}, {1: 'a'}]
+        dst = [{1: 'a', 'b': 1}, {1: 'a'}]
+        self.assertEqual(jsonpatch.make_patch(src, dst).patch,
+                         [{'op': 'replace', 'path': '/0/b', 'value': 1}])
+
+    def test_long_list_of_repeated_items_is_compared_by_position(self):
+        """ Matching up would compare each item with about 133 equal items,
+        while only two items differ by position """
+        src = [i % 150 for i in range(20000)]
+        dst = [-1] + src[1:-1] + [-2]
+        with mock.patch('jsonpatch.SequenceMatcher',
+                        side_effect=AssertionError('matched up')):
+            patch = jsonpatch.make_patch(src, dst)
+        self.assertEqual(len(patch.patch), 2)
+        self.assertEqual(patch.apply(src), dst)
+
+    def test_long_list_of_repeated_items_is_matched_up(self):
+        """ Comparing by position would change the items between the changes,
+        as they are shifted """
+        rng = random.Random(0)
+        src = [rng.randrange(150) for _ in range(9000)]
+        dst = src[:1000] + [-1] + src[1000:5000] + src[5001:8000] + [-2] + \
+            src[8000:]
+        self.assertPatch(src, dst, [
+            {'op': 'add', 'path': '/1000', 'value': -1},
+            {'op': 'remove', 'path': '/5001'},
+            {'op': 'add', 'path': '/8000', 'value': -2},
+        ])
+
+
+class ArrayItemsTests(unittest.TestCase):
+    """ The labels that order the items of an array in make_patch run out
+    between two items, and have to be spread out again. make_patch gets there
+    after about 2 ** 16 insertions, e.g. for ['a', 'b'] and
+    list(range(2 ** 16 + 20)), but inserting at the same index halves the
+    space between the labels each time """
+
+    def test_insert_at_same_index(self):
+        items = jsonpatch._ArrayItems()
+        first, last = items.at(0), items.at(1)
+        with mock.patch.object(jsonpatch._ArrayItems, '_relabel', autospec=True,
+                               side_effect=jsonpatch._ArrayItems._relabel) as relabel:
+            inserted = [items.insert(1) for _ in range(40)]
+        relabel.assert_called()
+
+        # each item is inserted directly after the first, in front of the
+        # ones inserted before it
+        expected = [first] + inserted[::-1] + [last]
+        self.assertEqual(items.present, expected)
+        self.assertEqual(items.labels, [item.label for item in expected])
+        self.assertEqual(items.labels, sorted(set(items.labels)))
+        self.assertEqual([item.index() for item in expected], list(range(42)))
+
+        # removed items keep the index they would have in the array
+        items.remove(inserted[0])
+        items.remove(first)
+        self.assertEqual(items.present, inserted[:0:-1] + [last])
+        self.assertEqual(inserted[0].index(), 39)
+        self.assertEqual(first.index(), 0)
+
+        items.reset()
+        self.assertEqual(items.present, [first, last])
+
 
 class ListTests(unittest.TestCase):
 
@@ -969,6 +1344,31 @@ class InvalidInputTests(unittest.TestCase):
         patch_obj = [ { "op": "invalid", "path": "/child", "value": { "grandchild": { } } } ]
         self.assertRaises(jsonpatch.JsonPatchException, jsonpatch.apply_patch, src, patch_obj)
 
+    def test_operation_not_an_object(self):
+        # each element of a patch has to be an object, #215
+        src = {"foo": "bar"}
+        for operation in [0, None, True, [], ["op", "add"]]:
+            self.assertRaises(jsonpatch.InvalidJsonPatch, jsonpatch.apply_patch, src, [operation])
+
+    def test_invalid_from(self):
+        # "from" has to be a JSON pointer, like "path", #215
+        src = {"foo": "bar"}
+        for op in ("move", "copy"):
+            for from_ in [0, None, ["foo"], {"foo": "bar"}]:
+                patch_obj = [ { "op": op, "from": from_, "path": "/baz" } ]
+                self.assertRaises(jsonpatch.InvalidJsonPatch, jsonpatch.apply_patch, src, patch_obj)
+
+    def test_duplicate_members_in_string_patch(self):
+        # an operation with two "op" (or "path") members is invalid, though
+        # json.loads would silently keep the last one
+        src = {"foo": "bar"}
+        for patch_str in [
+            '[{"op": "add", "path": "/baz", "value": "qux", "op": "move", "from": "/foo"}]',
+            '[{"op": "add", "path": "/baz", "path": "/qux", "value": 1}]',
+        ]:
+            self.assertRaises(jsonpatch.InvalidJsonPatch, jsonpatch.apply_patch, src, patch_str)
+            self.assertRaises(jsonpatch.InvalidJsonPatch, jsonpatch.JsonPatch.from_string, patch_str)
+
 
 class ConflictTests(unittest.TestCase):
 
@@ -997,6 +1397,22 @@ class ConflictTests(unittest.TestCase):
         patch_obj = [ { "op": "move", "from": "/foo", "path": "/foo/bar" } ]
         self.assertRaises(jsonpatch.JsonPatchException, jsonpatch.apply_patch, src, patch_obj)
 
+    def test_move_whole_document_into_own_child(self):
+        for src, path in [([], '/-'), ([1], '/0'), ({}, '/a'), ({'a': {}}, '/a/b')]:
+            patch_obj = [ { "op": "move", "from": "", "path": path } ]
+            self.assertRaises(jsonpatch.JsonPatchConflict, jsonpatch.apply_patch, src, patch_obj)
+
+    def test_move_whole_document_onto_itself(self):
+        for src in [[1], {'a': 1}]:
+            res = jsonpatch.apply_patch(src, [ { "op": "move", "from": "", "path": "" } ])
+            self.assertEqual(res, src)
+
+    def test_move_onto_itself_must_exist(self):
+        src = {'foo': [1]}
+        for path in ['/bar', '/foo/1']:
+            patch_obj = [ { "op": "move", "from": path, "path": path } ]
+            self.assertRaises(jsonpatch.JsonPatchConflict, jsonpatch.apply_patch, src, patch_obj)
+
     def test_replace_oob(self):
         src = {"foo": [1, 2]}
         patch_obj = [ { "op": "replace", "path": "/foo/10", "value": 10} ]
@@ -1011,6 +1427,16 @@ class ConflictTests(unittest.TestCase):
         src = {"foo": 1}
         patch_obj = [ { "op": "replace", "path": "/bar", "value": 10} ]
         self.assertRaises(jsonpatch.JsonPatchConflict, jsonpatch.apply_patch, src, patch_obj)
+
+    def test_add_replace_in_immutable_sequence(self):
+        # a tuple can be indexed like an array, but not be modified
+        src = {"foo": (1, 2)}
+        for patch_obj in [
+            [ { "op": "add", "path": "/foo/0", "value": 0 } ],
+            [ { "op": "add", "path": "/foo/-", "value": 3 } ],
+            [ { "op": "replace", "path": "/foo/0", "value": 0 } ],
+        ]:
+            self.assertRaises(jsonpatch.JsonPatchConflict, jsonpatch.apply_patch, src, patch_obj)
 
 
 class StringIndexingTests(unittest.TestCase):
@@ -1084,6 +1510,12 @@ class JsonPointerTests(unittest.TestCase):
         expected = {'bar': 'bar', 'baz': [42]}
         self.assertEqual(result, expected)
 
+    def test_copy_from_pointer(self):
+        patch = jsonpatch.JsonPatch([
+            {'op': 'copy', 'from': jsonpointer.JsonPointer('/foo'), 'path': '/bar'},
+        ])
+        self.assertEqual(patch.apply({'foo': 1}), {'foo': 1, 'bar': 1})
+
 
 class JsonPatchCreationTest(unittest.TestCase):
 
@@ -1135,6 +1567,10 @@ class UtilityMethodTests(unittest.TestCase):
             jsonpatch.ReplaceOperation({'path': '/'}).apply({})
 
         with self.assertRaises(jsonpatch.InvalidJsonPatch):
+            jsonpatch.ReplaceOperation({'path': '/top/-', 'value': 'foo'}).apply({'top': ['value']})
+
+        # for an object, '-' is an ordinary member name (#212)
+        with self.assertRaises(jsonpatch.JsonPatchConflict):
             jsonpatch.ReplaceOperation({'path': '/top/-', 'value': 'foo'}).apply({'top': {'inner': 'value'}})
 
         with self.assertRaises(jsonpatch.JsonPatchConflict):
@@ -1163,6 +1599,68 @@ class UtilityMethodTests(unittest.TestCase):
 
         with self.assertRaises(jsonpatch.JsonPatchConflict):
             jsonpatch.CopyOperation({'path': '/target', 'from': '/source'}).apply({})
+
+
+class OperationLocationTests(unittest.TestCase):
+    """ The parts of 'path' and 'from' that operations expose, also to change
+    them in place """
+
+    def test_path_and_key(self):
+        op = jsonpatch.RemoveOperation({'op': 'remove', 'path': '/a/0/b'})
+        # unlike the 'path' member, path is only the parts before the key,
+        # without a leading '/'
+        self.assertEqual(op.path, 'a/0')
+        self.assertEqual(op.key, 'b')
+        # array indices are ints, other parts stay strings
+        self.assertEqual([op.get_part(i) for i in range(3)], ['a', 0, 'b'])
+        self.assertEqual(op.get_part(-2), 0)
+
+        op = jsonpatch.AddOperation({'op': 'add', 'path': '/foo/-', 'value': 1})
+        self.assertEqual((op.path, op.key), ('foo', '-'))
+        op = jsonpatch.AddOperation({'op': 'add', 'path': '/foo', 'value': 1})
+        self.assertEqual((op.path, op.key), ('', 'foo'))
+
+    def test_set_key(self):
+        operation = {'op': 'add', 'path': '/foo/1', 'value': 9}
+        op = jsonpatch.AddOperation(operation)
+        op.key = 0
+        # the operation that was passed is changed as well
+        self.assertEqual(operation['path'], '/foo/0')
+        self.assertEqual((op.location, op.pointer.path), ('/foo/0', '/foo/0'))
+        self.assertEqual(op.apply({'foo': [1, 2]}), {'foo': [9, 1, 2]})
+
+        # the new part is escaped in the path
+        op.key = 'a/b'
+        self.assertEqual(operation['path'], '/foo/a~1b')
+        self.assertEqual(op.key, 'a/b')
+
+    def test_set_part(self):
+        operation = {'op': 'replace', 'path': '/a/0/b', 'value': 9}
+        op = jsonpatch.ReplaceOperation(operation)
+        op.set_part(1, 1)
+        self.assertEqual(operation['path'], '/a/1/b')
+        self.assertEqual(op.location, '/a/1/b')
+        self.assertEqual(op.apply({'a': [{'b': 1}, {'b': 2}]}),
+                         {'a': [{'b': 1}, {'b': 9}]})
+
+    def test_from_path_and_key(self):
+        op = jsonpatch.MoveOperation({'op': 'move', 'from': '/a/1/b', 'path': '/c'})
+        self.assertEqual(op.from_path, 'a/1')
+        self.assertEqual(op.from_key, 'b')
+        self.assertEqual([op.get_from_part(i) for i in range(3)], ['a', 1, 'b'])
+        self.assertEqual((op.path, op.key), ('', 'c'))
+
+    def test_set_from_key(self):
+        operation = {'op': 'move', 'from': '/a/1', 'path': '/b'}
+        op = jsonpatch.MoveOperation(operation)
+        op.from_key = 0
+        self.assertEqual(operation, {'op': 'move', 'from': '/a/0', 'path': '/b'})
+        self.assertEqual(op.apply({'a': ['x', 'y']}), {'a': ['y'], 'b': 'x'})
+
+        # the new part is escaped in 'from', and 'path' is kept
+        op.set_from_part(0, 'c/d')
+        self.assertEqual(operation, {'op': 'move', 'from': '/c~1d/0', 'path': '/b'})
+        self.assertEqual(op.apply({'c/d': ['x']}), {'c/d': [], 'b': 'x'})
 
 
 class CustomJsonPointer(jsonpointer.JsonPointer):
@@ -1331,11 +1829,14 @@ if __name__ == '__main__':
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(ConflictTests))
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(StringIndexingTests))
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(OptimizationTests))
+        suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(ArrayItemsTests))
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(JsonPointerTests))
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(JsonPatchCreationTest))
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(UtilityMethodTests))
+        suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(OperationLocationTests))
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(CustomJsonPointerTests))
         suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(CustomOperationTests))
+        suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(CommandLineTests))
         return suite
 
 
