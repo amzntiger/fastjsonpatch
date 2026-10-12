@@ -127,6 +127,21 @@ jobs:
           name: sdist
           path: dist
 
+  # One check for branch protection to require: fails unless every test, wheel and
+  # sdist job succeeded.
+  ci-ok:
+    name: ci-ok
+    needs: [test, wheels, sdist]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required jobs succeeded
+        run: |
+          echo 'test=${{ needs.test.result }} wheels=${{ needs.wheels.result }} sdist=${{ needs.sdist.result }}'
+          test '${{ needs.test.result }}' = success
+          test '${{ needs.wheels.result }}' = success
+          test '${{ needs.sdist.result }}' = success
+
   publish:
     name: publish to ${{ startsWith(github.ref, 'refs/tags/v') && 'PyPI' || 'TestPyPI' }}
     needs: [test, wheels, sdist]
