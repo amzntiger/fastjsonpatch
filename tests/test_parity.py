@@ -233,9 +233,9 @@ print(importers[0] if importers else "")
 
 
 def test_import_does_not_load_importlib_metadata():
-    # importlib.metadata alone used to add ~30 ms to `import fastjsonpatch`. Some
-    # Python installs load it at startup (seen on macOS and Windows CI), so drop it
-    # from sys.modules first and record who imports it again.
+    # importlib.metadata alone used to add ~30 ms to `import fastjsonpatch`. Drop it
+    # from sys.modules first, in case the interpreter loaded it at startup, and
+    # record who imports it again.
     out = subprocess.run([sys.executable, "-I", "-c", _SPY_IMPORTLIB_METADATA],
                          capture_output=True, text=True, check=True)
     preloaded, _, importer = out.stdout.partition("\n")
