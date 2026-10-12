@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-12)
 
 Now matches jsonpatch 1.35 instead of 1.34: the same patches, documents and exceptions.
 Code written against 0.1.x can see different results:
