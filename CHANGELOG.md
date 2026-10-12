@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 (unreleased)
+## 0.1.3 (2026-10-12)
 
 - Fix: `replace` with a path ending in `-` that names a dict key (`{"-": 1}`,
   path `/-`) was applied; jsonpatch 1.34 raises `InvalidJsonPatch` for it, and
