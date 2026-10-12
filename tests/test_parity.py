@@ -207,6 +207,19 @@ def test_standalone_does_not_import_jsonpatch():
     assert out.stdout.strip() == "False"
 
 
+def test_version_matches_the_installed_package():
+    # __version__ comes from Cargo.toml; the wheel's version from pyproject.toml.
+    import importlib.metadata
+    assert fastjsonpatch.__version__ == importlib.metadata.version("fastjsonpatch")
+
+
+def test_import_does_not_load_importlib_metadata():
+    # importlib.metadata alone used to add ~30 ms to `import fastjsonpatch`
+    code = "import sys, fastjsonpatch; print('importlib.metadata' in sys.modules)"
+    out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"
+
+
 def test_aliasing_preserved_like_deepcopy():
     shared = [1, 2]
     doc = {"a": shared, "b": shared}

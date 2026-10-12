@@ -50,7 +50,6 @@ Custom pointer classes, custom ``operations`` and subclasses that override
 import collections
 import copy
 import functools
-import importlib.metadata
 import json
 from collections.abc import MutableMapping, MutableSequence, Sequence
 from types import MappingProxyType
@@ -64,7 +63,7 @@ _ST_ADD = 0
 _ST_REMOVE = 1
 
 
-__version__ = importlib.metadata.version('fastjsonpatch')
+__version__ = _core.__version__
 __license__ = 'BSD-3-Clause'
 # Version of jsonpatch whose behaviour this module reproduces.
 __jsonpatch_version__ = '1.34'
