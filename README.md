@@ -2,8 +2,8 @@
 
 A drop-in replacement for [jsonpatch](https://github.com/stefankoegl/python-json-patch)
 ([RFC 6902](https://www.rfc-editor.org/rfc/rfc6902)) with `make_patch` and `apply`
-written in Rust. It returns the same patches and documents as jsonpatch 1.34 and raises
-exceptions with the same types and messages.
+written in Rust. It returns the same patches and documents as jsonpatch 1.35 and raises
+exceptions with the same types and messages. (fastjsonpatch 0.1.x matches jsonpatch 1.34.)
 
 ```sh
 pip install fastjsonpatch
@@ -26,32 +26,29 @@ jsonpatch.apply_patch(src, [{"op": "remove", "path": "/ports/0"}])
 ```
 
 Requires CPython 3.12+. Wheels are published for Linux (x86_64, aarch64; glibc and
-musl), macOS (arm64, x86_64) and Windows (x64). The only dependency is `jsonpointer`.
+musl), macOS (arm64, x86_64) and Windows (x64). The only dependency is `jsonpointer`
+(3.2 or later).
 
 ## Performance
 
-Linux x86_64, Python 3.13, best of several runs:
+fastjsonpatch 0.2.0 vs jsonpatch 1.35, Linux x86_64, Python 3.13, best of several runs:
 
 | workload | jsonpatch | fastjsonpatch | speedup |
 |---|---|---|---|
-| `make_patch`, Kubernetes OpenAPI v1.33 → v1.34 (3.7 → 3.8 MB, 283 ops) | 136.4 ms | 9.6 ms | **14x** |
-| `apply`, the same 283 ops | 78.0 ms | 11.4 ms | **7x** |
-| `make_patch`, 10k records with 100 field edits | 292.61 ms | 5.26 ms | **56x** |
-| `apply`, the same 100 ops | 89.38 ms | 7.90 ms | **11x** |
-| `make_patch`, small REST resource ×1000 | 74.4 ms | 5.6 ms | **13x** |
-| `apply_patch`, small REST resource ×1000 | 47.4 ms | 7.5 ms | **6x** |
+| `make_patch`, Kubernetes OpenAPI v1.33 → v1.34 (3.7 → 3.8 MB, 259 ops) | 157.3 ms | 11.4 ms | **14x** |
+| `apply`, the same 259 ops | 54.8 ms | 7.6 ms | **7x** |
+| `make_patch`, 10k records with 100 field edits | 163.3 ms | 10.9 ms | **15x** |
+| `apply`, a 2-op patch to the 10k records | 57.7 ms | 5.5 ms | **10x** |
+| `make_patch`, small REST resource ×1000 | 75.6 ms | 4.4 ms | **17x** |
+| `apply_patch`, small REST resource ×1000 | 26.3 ms | 4.8 ms | **5x** |
 
-Across all measured workloads, `make_patch` is 9-57x faster and `apply` 4-27x (4x is a
-3-operation patch applied `in_place` to a 3.8 MB document, where no copy is made). On
-Python 3.14, whose `copy.deepcopy` is faster, the `apply` speedup is smaller (about 6x
-instead of 11x on the 10k-record workload). Full tables and an explanation of where
-the time goes are in
+How the time is spent is explained in
 [BENCHMARKS.md](https://github.com/amzntiger/fastjsonpatch/blob/main/BENCHMARKS.md);
 `python bench/compare.py` (in the source distribution) measures on your machine.
 
 ## Compatibility
 
-fastjsonpatch is jsonpatch 1.34's module with `JsonPatch.__init__` (validation),
+fastjsonpatch is jsonpatch 1.35's module with `JsonPatch.__init__` (validation),
 `JsonPatch.from_diff` (`make_patch`) and `JsonPatch.apply` (`apply_patch`) routed to
 Rust; every other public name is jsonpatch's own code. Inputs the Rust code does not
 handle exactly fall back to jsonpatch's original code before anything is modified:
@@ -65,13 +62,14 @@ Known differences:
   `except fastjsonpatch.JsonPatchConflict` does not catch an exception raised by the `jsonpatch` package, and vice versa.
 - Values in a document that are not dicts, lists or JSON scalars are copied with
   `copy.deepcopy` one by one, so aliasing between such values is not preserved.
-- `__version__` is fastjsonpatch's version; `__jsonpatch_version__` is `"1.34"`.
+- `__version__` is fastjsonpatch's version; `__jsonpatch_version__` is `"1.35"`.
   jsonpatch's `__author__` and `__website__` are not defined.
 
 ## Testing
 
-About 1,580 tests: randomized comparisons against jsonpatch 1.34 (patches, documents
-and errors), jsonpatch's own test suite and doctests, and the
+About 1,640 tests: randomized comparisons against jsonpatch 1.35 (patches, documents
+and errors), jsonpatch's own test suite (without its command-line tests) and doctests,
+and the
 [json-patch-tests](https://github.com/json-patch/json-patch-tests) RFC 6902 suite.
 CI runs them with Python 3.12-3.14 on Linux (x86_64, aarch64; glibc), macOS (arm64,
 x86_64) and Windows (x64); the musl wheels are built but not tested in CI.

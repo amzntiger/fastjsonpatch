@@ -30,7 +30,7 @@
 # THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-"""Apply JSON-Patches (RFC 6902) - a faster drop-in for jsonpatch 1.34.
+"""Apply JSON-Patches (RFC 6902) - a faster drop-in for jsonpatch 1.35.
 
 This is jsonpatch's module with its hot paths moved to Rust (``fastjsonpatch._core``):
 
@@ -47,11 +47,13 @@ Custom pointer classes, custom ``operations`` and subclasses that override
 ``_get_operation`` always use the pure-Python code.
 """
 
+import bisect
 import collections
 import copy
 import functools
 import json
-from collections.abc import MutableMapping, MutableSequence, Sequence
+from collections.abc import Mapping, MutableMapping, MutableSequence, Sequence
+from difflib import SequenceMatcher
 from types import MappingProxyType
 
 from jsonpointer import JsonPointer, JsonPointerException
@@ -62,11 +64,15 @@ from . import _core
 _ST_ADD = 0
 _ST_REMOVE = 1
 
+# Up to which product of their lengths DiffBuilder matches up all equal items
+# of two lists
+_EXACT_MATCH_LIMIT = 500 ** 2
+
 
 __version__ = _core.__version__
 __license__ = 'BSD-3-Clause'
 # Version of jsonpatch whose behaviour this module reproduces.
-__jsonpatch_version__ = '1.34'
+__jsonpatch_version__ = '1.35'
 
 
 class JsonPatchException(Exception):
@@ -118,7 +124,7 @@ def apply_patch(doc, patch, in_place=False, pointer_cls=JsonPointer):
     :param patch: JSON patch as list of dicts or raw JSON-encoded string.
     :type patch: list or str
 
-    :param in_place: While :const:`True` patch will modify target document.
+    :param in_place: While ``True`` patch will modify target document.
                      By default patch will be applied to document copy.
     :type in_place: bool
 
@@ -196,17 +202,37 @@ class PatchOperation(object):
 
         self.operation = operation
 
+    def _from_pointer(self):
+        """Builds the pointer of the 'from' member like __init__ builds the
+        one of 'path'."""
+        try:
+            from_ptr = self.operation['from']
+        except KeyError:
+            raise InvalidJsonPatch(
+                "The operation does not contain a 'from' member")
+
+        if isinstance(from_ptr, self.pointer_cls):
+            return from_ptr
+
+        try:
+            return self.pointer_cls(from_ptr)
+        except TypeError:
+            raise InvalidJsonPatch("Invalid 'from'")
+
     def apply(self, obj):
         """Abstract method that applies a patch operation to the specified object."""
         raise NotImplementedError('should implement the patch operation.')
 
     def __hash__(self):
-        return hash(frozenset(self.operation.items()))
+        # Other members can hold arrays or objects, which are unhashable.
+        # Operations that compare equal still have equal 'op' and 'path'.
+        return hash((self.operation.get('op'), self.operation['path']))
 
     def __eq__(self, other):
         if not isinstance(other, PatchOperation):
             return False
-        return self.operation == other.operation
+        # e.g. tests for 1 and for true behave differently
+        return _json_equal(self.operation, other.operation)
 
     def __ne__(self, other):
         return not(self == other)
@@ -239,7 +265,10 @@ class RemoveOperation(PatchOperation):
     """Removes an object property or an array element."""
 
     def apply(self, obj):
-        subobj, part = _to_last(self.pointer, obj)
+        subobj, part = self.pointer.to_last(obj)
+
+        if part is None:
+            raise JsonPatchConflict("can't remove the whole document")
 
         if isinstance(subobj, Sequence) and not isinstance(part, int):
             raise JsonPointerException("invalid array index '{0}'".format(part))
@@ -268,13 +297,13 @@ class AddOperation(PatchOperation):
         return self._add(obj, copy.deepcopy(value))
 
     def _add(self, obj, value):
-        subobj, part = _to_last(self.pointer, obj)
+        subobj, part = self.pointer.to_last(obj)
+
+        if part is None:
+            return value  # we're replacing the root, whatever its type
 
         if isinstance(subobj, MutableSequence):
-            if part is None:
-                return value  # we're replacing the root
-
-            elif part == '-':
+            if part == '-':
                 subobj.append(value)  # pylint: disable=E1103
 
             elif part > len(subobj) or part < 0:
@@ -284,16 +313,10 @@ class AddOperation(PatchOperation):
                 subobj.insert(part, value)  # pylint: disable=E1103
 
         elif isinstance(subobj, MutableMapping):
-            if part is None:
-                obj = value  # we're replacing the root
-            else:
-                subobj[part] = value
+            subobj[part] = value
 
         else:
-            if part is None:
-                raise TypeError("invalid document type {0}".format(type(subobj)))
-            else:
-                raise JsonPatchConflict("unable to fully resolve json pointer {0}, part {1}".format(self.location, part))
+            raise JsonPatchConflict("unable to fully resolve json pointer {0}, part {1}".format(self.location, part))
         return obj
 
 
@@ -310,15 +333,17 @@ class ReplaceOperation(PatchOperation):
         # copied for the same reason as in AddOperation.apply
         value = copy.deepcopy(value)
 
-        subobj, part = _to_last(self.pointer, obj)
+        subobj, part = self.pointer.to_last(obj)
 
         if part is None:
             return value
 
-        if part == "-":
-            raise InvalidJsonPatch("'path' with '-' can't be applied to 'replace' operation")
-
         if isinstance(subobj, MutableSequence):
+            # '-' only refers to the (nonexistent) element after the end of
+            # an array; for an object it is an ordinary member name
+            if part == "-":
+                raise InvalidJsonPatch("'path' with '-' can't be applied to 'replace' operation")
+
             if part >= len(subobj) or part < 0:
                 raise JsonPatchConflict("can't replace outside of list")
 
@@ -327,10 +352,7 @@ class ReplaceOperation(PatchOperation):
                 msg = "can't replace a non-existent object '{0}'".format(part)
                 raise JsonPatchConflict(msg)
         else:
-            if part is None:
-                raise TypeError("invalid document type {0}".format(type(subobj)))
-            else:
-                raise JsonPatchConflict("unable to fully resolve json pointer {0}, part {1}".format(self.location, part))
+            raise JsonPatchConflict("unable to fully resolve json pointer {0}, part {1}".format(self.location, part))
 
         subobj[part] = value
         return obj
@@ -340,16 +362,20 @@ class MoveOperation(PatchOperation):
     """Moves an object property or an array element to a new location."""
 
     def apply(self, obj):
-        try:
-            if isinstance(self.operation['from'], self.pointer_cls):
-                from_ptr = self.operation['from']
-            else:
-                from_ptr = self.pointer_cls(self.operation['from'])
-        except KeyError:
-            raise InvalidJsonPatch(
-                "The operation does not contain a 'from' member")
+        from_ptr = self._from_pointer()
 
-        subobj, part = _to_last(from_ptr, obj)
+        # Checked before anything is resolved, as removing an array element
+        # shifts its siblings, so the target would resolve to a different
+        # location. This also covers moving the whole document ('from' is "").
+        if self.pointer != from_ptr and self.pointer.contains(from_ptr):
+            raise JsonPatchConflict('Cannot move values into their own children')
+
+        subobj, part = _to_existing_last(from_ptr, obj)
+
+        # Moving the whole document onto itself is a no-op
+        if part is None:
+            return obj
+
         try:
             value = subobj[part]
         except (KeyError, IndexError) as ex:
@@ -358,10 +384,6 @@ class MoveOperation(PatchOperation):
         # If source and target are equal, this is a no-op
         if self.pointer == from_ptr:
             return obj
-
-        if isinstance(subobj, MutableMapping) and \
-                self.pointer.contains(from_ptr):
-            raise JsonPatchConflict('Cannot move values into their own children')
 
         obj = RemoveOperation({
             'op': 'remove',
@@ -407,7 +429,7 @@ class TestOperation(PatchOperation):
 
     def apply(self, obj):
         try:
-            subobj, part = _to_last(self.pointer, obj)
+            subobj, part = self.pointer.to_last(obj)
             if part is None:
                 val = subobj
             else:
@@ -421,7 +443,7 @@ class TestOperation(PatchOperation):
             raise InvalidJsonPatch(
                 "The operation does not contain a 'value' member")
 
-        if val != value:
+        if not _json_equal(val, value):
             msg = '{0} ({1}) is not equal to tested value {2} ({3})'
             raise JsonPatchTestFailed(msg.format(val, type(val),
                                                  value, type(value)))
@@ -433,13 +455,9 @@ class CopyOperation(PatchOperation):
     """ Copies an object property or an array element to a new location """
 
     def apply(self, obj):
-        try:
-            from_ptr = self.pointer_cls(self.operation['from'])
-        except KeyError:
-            raise InvalidJsonPatch(
-                "The operation does not contain a 'from' member")
+        from_ptr = self._from_pointer()
 
-        subobj, part = _to_last(from_ptr, obj)
+        subobj, part = _to_existing_last(from_ptr, obj)
         try:
             value = copy.deepcopy(subobj if part is None else subobj[part])
         except (KeyError, IndexError) as ex:
@@ -455,18 +473,6 @@ class CopyOperation(PatchOperation):
 
 
 class JsonPatch(object):
-    json_dumper = staticmethod(json.dumps)
-    json_loader = staticmethod(_jsonloads)
-
-    operations = MappingProxyType({
-        'remove': RemoveOperation,
-        'add': AddOperation,
-        'replace': ReplaceOperation,
-        'move': MoveOperation,
-        'test': TestOperation,
-        'copy': CopyOperation,
-    })
-
     """A JSON Patch is a list of Patch Operations.
 
     >>> patch = JsonPatch([
@@ -512,6 +518,18 @@ class JsonPatch(object):
     ...     patch.apply(old)    #doctest: +ELLIPSIS
     {...}
     """
+    json_dumper = staticmethod(json.dumps)
+    json_loader = staticmethod(_jsonloads)
+
+    operations = MappingProxyType({
+        'remove': RemoveOperation,
+        'add': AddOperation,
+        'replace': ReplaceOperation,
+        'move': MoveOperation,
+        'test': TestOperation,
+        'copy': CopyOperation,
+    })
+
     def __init__(self, patch, pointer_cls=JsonPointer):
         self.patch = patch
         self.pointer_cls = pointer_cls
@@ -574,7 +592,7 @@ class JsonPatch(object):
 
         :param loads: A function of one argument that loads a serialized
                       JSON string.
-        :type loads: function
+        :type loads: Callable
 
         :param pointer_cls: JSON pointer class to use.
         :type pointer_cls: Type[JsonPointer]
@@ -603,7 +621,7 @@ class JsonPatch(object):
 
         :param dumps: A function of one argument that produces a serialized
                       JSON string.
-        :type dumps: function
+        :type dumps: Callable
 
         :param pointer_cls: JSON pointer class to use.
         :type pointer_cls: Type[JsonPointer]
@@ -667,6 +685,9 @@ class JsonPatch(object):
         return obj
 
     def _get_operation(self, operation):
+        if not isinstance(operation, Mapping):
+            raise InvalidJsonPatch("Operation must be an object")
+
         if 'op' not in operation:
             raise InvalidJsonPatch("Operation does not contain 'op' member")
 
@@ -703,37 +724,32 @@ class DiffBuilder(object):
         self.dumps = dumps
         self.pointer_cls = pointer_cls
         self.index_storage = [{}, {}]
-        self.index_storage2 = [[], []]
         self.__root = root = []
         self.src_doc = src_doc
         self.dst_doc = dst_doc
+        # the _ArrayItems of each array, by the location of the array
+        self.arrays = {}
         root[:] = [root, root, None]
 
-    def store_index(self, value, index, st):
-        typed_key = (value, type(value))
+    def _move_key(self, value):
+        """ A key of value, which is equal for values that are equal in JSON,
+        so that e.g. [1] is not moved where [true] is added """
         try:
-            storage = self.index_storage[st]
-            stored = storage.get(typed_key)
-            if stored is None:
-                storage[typed_key] = [index]
-            else:
-                storage[typed_key].append(index)
+            # Serialized like in _differing_runs
+            return self.dumps(_sorted_members(value))
+        except (TypeError, ValueError, RecursionError):
+            # Values that cannot be serialized, e.g. as they contain
+            # themselves, are only moved where they are added unchanged
+            return id(value)
 
-        except TypeError:
-            self.index_storage2[st].append((typed_key, index))
+    def store_index(self, value, index, st):
+        storage = self.index_storage[st]
+        storage.setdefault(self._move_key(value), []).append(index)
 
     def take_index(self, value, st):
-        typed_key = (value, type(value))
-        try:
-            stored = self.index_storage[st].get(typed_key)
-            if stored:
-                return stored.pop()
-
-        except TypeError:
-            storage = self.index_storage2[st]
-            for i in range(len(storage)-1, -1, -1):
-                if storage[i][0] == typed_key:
-                    return storage.pop(i)[1]
+        stored = self.index_storage[st].get(self._move_key(value))
+        if stored:
+            return stored.pop()
 
     def insert(self, op):
         root = self.__root
@@ -747,13 +763,6 @@ class DiffBuilder(object):
         link_next[0] = link_prev
         index[:] = []
 
-    def iter_from(self, start):
-        root = self.__root
-        curr = start[1]
-        while curr is not root:
-            yield curr[2]
-            curr = curr[1]
-
     def __iter__(self):
         root = self.__root
         curr = root[1]
@@ -762,11 +771,11 @@ class DiffBuilder(object):
             curr = curr[1]
 
     def execute(self):
-        root = self.__root
-        curr = root[1]
-        while curr is not root:
-            if curr[1] is not root:
-                op_first, op_second = curr[2], curr[1][2]
+        operations = list(self._replay())
+        i = 0
+        while i < len(operations):
+            if i + 1 < len(operations):
+                op_first, op_second = operations[i], operations[i + 1]
                 if op_first['path'] == op_second['path'] and \
                         op_first['op'] == 'remove' and \
                         op_second['op'] == 'add':
@@ -775,93 +784,129 @@ class DiffBuilder(object):
                         'path': _to_pointer(op_second['path']),
                         'value': op_second['value'],
                     }
-                    curr = curr[1][1]
+                    i += 2
                     continue
 
-            operation = dict(curr[2])
+            operation = operations[i]
             for member in ('from', 'path'):
                 if member in operation:
                     operation[member] = _to_pointer(operation[member])
             yield operation
-            curr = curr[1]
+            i += 1
 
-    def _adjust_following(self, index, removed):
-        """ Works out how the operations following index change if the item
-        that the operation at index removes (or adds, if not removed) is
-        moved there later instead.
+    def _replay(self):
+        """ Applies the operations to the arrays of the source document, and
+        returns them with the array indices at which they apply """
+        for items in self.arrays.values():
+            items.reset()
 
-        The operations were made for documents without (or with) the item,
-        and are changed to documents with (or without) it. They never refer
-        to the item, as the diff does not change values it adds or removes.
-        Returns these changes and where the item is after the operations. """
-        location = index[2]['path']
-        changes = []
-        # only array indices change, so nothing does if there are none
-        if not any(isinstance(part, int) for part in location):
-            return changes, location
-
-        for op in self.iter_from(index):
+        for op in self:
+            operation = dict(op)
             # 'from' is removed before 'path' is added
-            for member in ('from', 'path'):
-                if member not in op:
-                    continue
+            if 'from' in op:
+                operation['from'] = self._parts(op['from'])
+                self._set_present(op['from'], False)
 
-                inserted = member == 'path' and op['op'] in ('add', 'move')
-                if removed:
-                    parts = _with_item(op[member], location, inserted)
-                    present = parts
-                else:
-                    parts = _without_item(op[member], location)
-                    present = op[member]
+            operation['path'] = self._parts(op['path'])
+            if op['op'] == 'remove':
+                self._set_present(op['path'], False)
+            elif op['op'] in ('add', 'move'):
+                self._set_present(op['path'], True)
 
-                if op['op'] != 'replace':
-                    location = _item_after(location, present, inserted)
-                changes.append((op, member, parts))
+            yield operation
 
-        return changes, location
+    def _array_items(self, location):
+        """ The _ArrayItems of the array at location """
+        items = self.arrays.get(location)
+        if items is None:
+            items = self.arrays[location] = _ArrayItems()
+        return items
+
+    def _location(self, parts):
+        """ The location of parts in the current document """
+        location = ()
+        for part in parts:
+            if isinstance(part, int):
+                part = self._array_items(location).at(part)
+            location += (part,)
+        return location
+
+    def _new_location(self, path, key):
+        """ The location of an item inserted at key of the container at path
+        of the current document """
+        location = self._location(path)
+        if isinstance(key, int):
+            key = self._array_items(location).insert(key)
+        return _path_join(location, key)
+
+    def _parts(self, location):
+        """ The parts of location in the current document. If location is an
+        array item that is not in the array, its index is where it would be
+        if it was. """
+        return tuple(part.index() if isinstance(part, _ArrayItem) else part
+                     for part in location)
+
+    def _set_present(self, location, present):
+        """ Adds the array item at location to the current document, or
+        removes it, if not present """
+        item = location[-1] if location else None
+        if isinstance(item, _ArrayItem):
+            if present:
+                item.array.add(item)
+            else:
+                item.array.remove(item)
 
     def _item_added(self, path, key, item):
         target = _path_join(path, key)
         index = self.take_index(item, _ST_REMOVE)
         if index is not None:
-            changes, source = self._adjust_following(index, removed=True)
+            removed = index[2]['path']
+            # where the removed item is if it is not removed
+            source = self._parts(removed)
             # RFC 6902 does not allow moving a value into its own children
             if not _is_inside(target, source):
-                for op, member, parts in changes:
-                    op[member] = parts
                 self.remove(index)
                 if source != target:
-                    self.insert({'op': 'move', 'from': source,
-                                 'path': target})
+                    self.insert({'op': 'move', 'from': removed,
+                                 'path': self._new_location(path, key)})
+                else:
+                    # the removed item stays where the added one would be
+                    self._set_present(removed, True)
                 return
 
-        new_index = self.insert({'op': 'add', 'path': target, 'value': item})
+        new_index = self.insert({'op': 'add',
+                                 'path': self._new_location(path, key),
+                                 'value': item})
         self.store_index(item, new_index, _ST_ADD)
 
     def _item_removed(self, path, key, item):
         source = _path_join(path, key)
+        location = self._location(source)
         index = self.take_index(item, _ST_ADD)
         if index is not None:
-            changes, added = self._adjust_following(index, removed=False)
-            moved_from = _without_item(source, added)
-            target = _item_after(added, source, False)
-            # RFC 6902 does not allow moving a value into its own children
-            if not _is_inside(target, moved_from):
-                for op, member, parts in changes:
-                    op[member] = parts
-                self.remove(index)
-                if moved_from != target:
-                    self.insert({'op': 'move', 'from': moved_from,
-                                 'path': target})
-                return
+            added_location = index[2]['path']
+            added = self._parts(added_location)
+            # The documents are compared in order, so the added item is in
+            # the part compared already: it is in front of the removed one,
+            # and neither inside it nor moved by removing it
+            self.remove(index)
+            if _without_item(source, added) != added:
+                self._set_present(location, False)
+                self.insert({'op': 'move', 'from': location,
+                             'path': added_location})
+            else:
+                # the removed item stays where the added one would be
+                self._set_present(added_location, False)
+            return
 
-        new_index = self.insert({'op': 'remove', 'path': source})
+        self._set_present(location, False)
+        new_index = self.insert({'op': 'remove', 'path': location})
         self.store_index(item, new_index, _ST_REMOVE)
 
     def _item_replaced(self, path, key, item):
         self.insert({
             'op': 'replace',
-            'path': _path_join(path, key),
+            'path': self._location(_path_join(path, key)),
             'value': item,
         })
 
@@ -879,13 +924,79 @@ class DiffBuilder(object):
         for key in intersection:
             self._compare_values(path, str(key), src[key], dst[key])
 
+    def _differing_runs(self, src, dst):
+        """ Returns (i1, i2, j1, j2) for each run of items src[i1:i2] that is
+        replaced by dst[j1:j2], between runs of items that both lists have.
+
+        Without matching up the items they both have, inserting an item in
+        front of arrays or objects would change all of them that follow. """
+        try:
+            # Serialized like in _compare_values, so e.g. 1 and True differ,
+            # but independent of the order of object members
+            src_keys = [self.dumps(_sorted_members(item)) for item in src]
+            dst_keys = [self.dumps(_sorted_members(item)) for item in dst]
+        except (TypeError, ValueError, RecursionError):
+            # Items that cannot be serialized are compared by position
+            return [(0, len(src), 0, len(dst))]
+
+        # Only what is between the common start and end is matched up
+        shorter = min(len(src), len(dst))
+        start = 0
+        while start < shorter and src_keys[start] == dst_keys[start]:
+            start += 1
+        common_end = 0
+        while common_end < shorter - start and \
+                src_keys[-1 - common_end] == dst_keys[-1 - common_end]:
+            common_end += 1
+        src_end, dst_end = len(src) - common_end, len(dst) - common_end
+
+        # How many operations replacing src[i1:i2] by dst[j1:j2] takes
+        def cost(i1, i2, j1, j2):
+            return abs((i2 - i1) - (j2 - j1)) + sum(
+                _positional_cost(src[i], dst[j])
+                for i, j in zip(range(i1, i2), range(j1, j2))
+                if src_keys[i] != dst_keys[j])
+
+        by_position = (start, src_end, start, dst_end)
+        position_cost = cost(*by_position)
+
+        # Matching up all items can take time proportional to the product of
+        # the list lengths. For longer lists SequenceMatcher does not match
+        # up items that are frequent in them, unless next to other matches
+        exact = (src_end - start) * (dst_end - start) <= _EXACT_MATCH_LIMIT
+        if not exact:
+            # It still compares each item with the equal items of the other
+            # list that are not frequent, which takes quadratic time for long
+            # lists of repeated items. Comparing by position takes quadratic
+            # time in its operations as well, as the diff turns them into
+            # moves, so matching up may only take about as long
+            counts = collections.Counter(dst_keys[start:dst_end])
+            comparisons = sum(counts[key] for key in src_keys[start:src_end])
+            if comparisons > max(_EXACT_MATCH_LIMIT, position_cost ** 2):
+                return [by_position]
+
+        matcher = SequenceMatcher(None, src_keys[start:src_end],
+                                  dst_keys[start:dst_end], autojunk=not exact)
+        runs = [(start + i1, start + i2, start + j1, start + j2)
+                for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+                if tag != 'equal']
+
+        # Items can be equal by chance, and matching them up can take more
+        # operations than comparing by position: for [2, 3, 5] and [3, 3, 4]
+        # it removes 2, replaces 5 and adds 4 instead of replacing 2 and 5.
+        # It can also pair up arrays or objects that differ in more members.
+        if sum(cost(*run) for run in runs) > position_cost:
+            return [by_position]
+
+        return runs
+
     def _compare_lists(self, path, src, dst):
-        len_src, len_dst = len(src), len(dst)
-        max_len = max(len_src, len_dst)
-        min_len = min(len_src, len_dst)
-        for key in range(max_len):
-            if key < min_len:
-                old, new = src[key], dst[key]
+        # The list has become dst[:j1] + src[i1:] when a run is compared, so
+        # src[i1] is at index j1
+        for i1, i2, j1, j2 in self._differing_runs(src, dst):
+            paired = min(i2 - i1, j2 - j1)
+            for key in range(j1, j1 + paired):
+                old, new = src[i1 + key - j1], dst[key]
                 if isinstance(old, MutableMapping) and \
                         isinstance(new, MutableMapping):
                     self._compare_dicts(_path_join(path, key), old, new)
@@ -904,10 +1015,10 @@ class DiffBuilder(object):
                     self._item_removed(path, key, old)
                     self._item_added(path, key, new)
 
-            elif len_src > len_dst:
-                self._item_removed(path, len_dst, src[key])
+            for old in src[i1 + paired:i2]:
+                self._item_removed(path, j1 + paired, old)
 
-            else:
+            for key in range(j1 + paired, j2):
                 self._item_added(path, key, dst[key])
 
     def _compare_values(self, path, key, src, dst):
@@ -933,8 +1044,160 @@ class DiffBuilder(object):
             self._item_replaced(path, key, dst)
 
 
-# The DiffBuilder keeps locations as tuples of object keys (str) and array
-# indices (int), so it can tell them apart when it adjusts array indices
+def _positional_cost(old, new):
+    """ Estimates how many operations change old into new, if the items of
+    arrays are compared by position """
+    if old == new:
+        return 0
+    if isinstance(old, MutableMapping) and isinstance(new, MutableMapping):
+        return sum(_positional_cost(old[key], new[key]) if key in new else 1
+                   for key in old) + sum(key not in old for key in new)
+    if isinstance(old, MutableSequence) and isinstance(new, MutableSequence):
+        return abs(len(old) - len(new)) + sum(
+            _positional_cost(*items) for items in zip(old, new))
+    return 1
+
+
+def _json_equal(first, second):
+    """ Compares values the way RFC 6902, 4.6 does: numbers by value, but
+    literals like true only with themselves, which Python considers equal to
+    1, and arrays and objects member by member """
+    if isinstance(first, bool) or isinstance(second, bool):
+        return isinstance(first, bool) and isinstance(second, bool) and \
+            first == second
+    if isinstance(first, MutableMapping) and \
+            isinstance(second, MutableMapping):
+        return len(first) == len(second) and all(
+            key in second and _json_equal(first[key], second[key])
+            for key in first)
+    if isinstance(first, MutableSequence) and \
+            isinstance(second, MutableSequence):
+        return len(first) == len(second) and all(
+            _json_equal(*items) for items in zip(first, second))
+    return first == second
+
+
+def _sorted_members(value):
+    """ Copies the arrays and objects in value, with the members of objects
+    sorted by key """
+    # Most values are scalars, so they are checked for first
+    if value is None or isinstance(value, (str, int, float)):
+        return value
+    if isinstance(value, MutableMapping):
+        return {key: _sorted_members(value[key]) for key in sorted(value)}
+    if isinstance(value, MutableSequence):
+        return [_sorted_members(item) for item in value]
+    return value
+
+
+# The DiffBuilder works with parts, which are tuples of object keys (str) and
+# array indices (int), and with locations, in which _ArrayItem objects take
+# the place of array indices. Operations keep locations: when a move replaces
+# an earlier 'add' or 'remove', the array indices in the operations after it
+# change, but their locations do not.
+
+
+class _ArrayItem(object):
+    """ An item that an array has at some point of the diff """
+
+    __slots__ = ('array', 'label', 'initial')
+
+    def __init__(self, array, label, initial):
+        self.array = array
+        self.label = label
+        # if the item is in the array of the source document
+        self.initial = initial
+
+    def index(self):
+        """ The index of the item in the array, or the index it would have if
+        it was in the array """
+        return bisect.bisect_left(self.array.present_labels, self.label)
+
+
+class _ArrayItems(object):
+    """ All items that an array has at some point of the diff, and the items
+    that it has at the moment, both ordered by their labels.
+
+    The array has its items in this order at every point of the diff, also
+    when a move later replaces the 'add' or 'remove' of an item. So an item
+    inserted at an index is put directly after the item before it in the
+    array: inserting at the index of a removed item inserts before it, if a
+    move replaces its 'remove' later. """
+
+    # how far apart the labels of items inserted one after the other are
+    step = 1 << 16
+    # how far apart labels are at the start and at the ends
+    gap = 1 << 32
+
+    def __init__(self):
+        self.items = []
+        self.labels = []
+        self.present = []
+        self.present_labels = []
+
+    def at(self, index):
+        """ The item at index of the array """
+        # the items of the source document follow the items that the diff
+        # has dealt with, so they are only created when needed
+        while len(self.present) <= index:
+            label = self.labels[-1] + self.gap if self.labels else 0
+            item = _ArrayItem(self, label, True)
+            self.items.append(item)
+            self.labels.append(label)
+            self.present.append(item)
+            self.present_labels.append(label)
+
+        return self.present[index]
+
+    def insert(self, index):
+        """ Inserts a new item at index of the array, and returns it """
+        position = 0
+        if index:
+            position = bisect.bisect_right(self.labels,
+                                           self.at(index - 1).label)
+
+        if position == 0 or position == len(self.labels):
+            if not self.labels:
+                label = 0
+            elif position == 0:
+                label = self.labels[0] - self.gap
+            else:
+                label = self.labels[-1] + self.gap
+
+        else:
+            if self.labels[position] - self.labels[position - 1] < 2:
+                self._relabel()
+            low, high = self.labels[position - 1], self.labels[position]
+            label = low + min(self.step, (high - low) // 2)
+
+        item = _ArrayItem(self, label, False)
+        self.items.insert(position, item)
+        self.labels.insert(position, label)
+        self.add(item)
+        return item
+
+    def _relabel(self):
+        self.labels = [i * self.gap for i in range(len(self.items))]
+        for item, label in zip(self.items, self.labels):
+            item.label = label
+        self.present_labels = [item.label for item in self.present]
+
+    def add(self, item):
+        """ Adds item to the array """
+        position = bisect.bisect_left(self.present_labels, item.label)
+        self.present.insert(position, item)
+        self.present_labels.insert(position, item.label)
+
+    def remove(self, item):
+        """ Removes item from the array """
+        position = bisect.bisect_left(self.present_labels, item.label)
+        del self.present[position]
+        del self.present_labels[position]
+
+    def reset(self):
+        """ Changes the array back to its items in the source document """
+        self.present = [item for item in self.items if item.initial]
+        self.present_labels = [item.label for item in self.present]
 
 
 def _path_join(path, key):
@@ -961,21 +1224,6 @@ def _shift(parts, depth, offset):
     return parts[:depth] + (parts[depth] + offset,) + parts[depth + 1:]
 
 
-def _with_item(parts, location, insertion):
-    """ Changes parts, which assumes that there is no item at location, to
-    the item being there. insertion tells if parts is where 'add' inserts """
-    depth = len(location) - 1
-    if isinstance(location[-1], int) and _is_inside(parts, location[:-1]):
-        index = parts[depth]
-        # inserting at the index of the item inserts before it
-        before_item = insertion and len(parts) == len(location) and \
-            index == location[-1]
-        if index >= location[-1] and not before_item:
-            return _shift(parts, depth, 1)
-
-    return parts
-
-
 def _without_item(parts, location):
     """ Changes parts, which assumes that there is an item at location, to
     the item missing """
@@ -987,33 +1235,15 @@ def _without_item(parts, location):
     return parts
 
 
-def _item_after(location, parts, inserted):
-    """ Where the item at location is after inserting (or removing, if not
-    inserted) the value at parts """
-    depth = len(parts) - 1
-    if not isinstance(parts[-1], int) or not _is_inside(location, parts[:-1]):
-        return location
+def _to_existing_last(pointer, doc):
+    """Resolve pointer like JsonPointer.to_last, for a location that has to
+    exist.
 
-    if inserted and location[depth] >= parts[-1]:
-        return _shift(location, depth, 1)
-
-    if not inserted and location[depth] > parts[-1]:
-        return _shift(location, depth, -1)
-
-    return location
-
-
-def _to_last(pointer, doc):
-    """Resolve pointer like JsonPointer.to_last, without indexing into strings.
-
-    RFC 6901 only allows reference tokens to be applied to objects and arrays,
-    but older versions of jsonpointer treat strings as sequences.
+    The '-' of an array refers to the nonexistent element after its last one.
     """
     subobj, part = pointer.to_last(doc)
 
-    if part is not None and isinstance(subobj, str):
-        raise JsonPointerException(
-            "Cannot apply token '{0}' to non-container type {1}".format(
-                part, type(subobj)))
+    if part == '-' and isinstance(subobj, Sequence):
+        raise JsonPointerException("invalid array index '{0}'".format(part))
 
     return subobj, part
