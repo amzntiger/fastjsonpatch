@@ -835,6 +835,9 @@ impl<'py> Applier<'_, 'py> {
                 if parts.is_empty() {
                     return Ok(Some(deepcopy(&v)?));
                 }
+                if parts.last().is_some_and(|p| p == "-") {
+                    return Ok(None); // jsonpatch rejects "-" here even for a dict key
+                }
                 let Some(s) = slot(obj, parts)? else { return Ok(None) };
                 if slot_value(&s)?.is_none() {
                     return Ok(None);

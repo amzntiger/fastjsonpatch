@@ -163,6 +163,25 @@ def test_invalid_patches(patch):
     assert outcome(lambda: fastjsonpatch.JsonPatch(patch)) == outcome(lambda: jsonpatch.JsonPatch(patch))
 
 
+@pytest.mark.parametrize("doc, patch", [
+    # jsonpatch rejects a final "-" in replace even when it names a dict key
+    ({"-": 1}, [{"op": "replace", "path": "/-", "value": 2}]),
+    ({"a": {"-": 1}}, [{"op": "replace", "path": "/a/-", "value": 2}]),
+    ([1], [{"op": "replace", "path": "/-", "value": 2}]),
+    ({"-": 1}, [{"op": "remove", "path": "/-"}]),
+    ({"-": 1}, [{"op": "add", "path": "/-", "value": 2}]),
+    ({"-": 1}, [{"op": "test", "path": "/-", "value": 1}]),
+    ({"-": 1}, [{"op": "move", "from": "/-", "path": "/b"}]),
+    ({"-": 1}, [{"op": "copy", "from": "/-", "path": "/b"}]),
+])
+def test_dash_key(doc, patch):
+    for in_place in (False, True):
+        a, b = copy.deepcopy(doc), copy.deepcopy(doc)
+        assert (outcome(lambda: fastjsonpatch.apply_patch(a, patch, in_place=in_place))
+                == outcome(lambda: jsonpatch.apply_patch(b, patch, in_place=in_place)))
+        assert repr(a) == repr(b)
+
+
 def test_exceptions_have_the_same_hierarchy():
     with pytest.raises(fastjsonpatch.JsonPatchConflict):
         fastjsonpatch.apply_patch({}, [{"op": "remove", "path": "/a"}])
