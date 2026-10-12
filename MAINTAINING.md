@@ -19,7 +19,7 @@ jsonpatch 1.34. A behaviour difference is a bug, unless it is listed in the READ
 ```sh
 maturin develop --release
 pip install "jsonpatch==1.34" pytest
-pytest tests                 # ~1570 tests, a few seconds
+pytest tests                 # ~1580 tests, a few seconds
 python bench/compare.py      # speed vs jsonpatch
 ```
 
@@ -32,6 +32,19 @@ python bench/compare.py      # speed vs jsonpatch
 
 CI runs the tests and the speed comparison on Linux x86_64/arm64, macOS arm64/x86_64
 and Windows for Python 3.12, 3.13 and 3.14; the run's summary page has the table.
+
+## Making changes
+
+Every change goes through a pull request; nothing is pushed to `main` directly.
+
+1. Branch from `main` (`fix/...`, `feat/...`, `chore/...`), commit, push the branch.
+2. Open a pull request. CI runs on it; the `ci-ok` check passes only when every
+   test, wheel and sdist job passed.
+3. Review the diff on the pull request page, then merge (squash or merge commit).
+
+`main` has a branch rule that requires a pull request and the `ci-ok` check. It does
+not require an approving review: GitHub does not let the author approve their own
+pull request, and the maintainer pushes with their own account.
 
 ## Versions
 
@@ -46,19 +59,22 @@ and Windows for Python 3.12, 3.13 and 3.14; the run's summary page has the table
 While on 0.x the API may still change between minor versions. Go to 1.0 once the
 package has had real-world use without behaviour bugs.
 
-The version lives only in `pyproject.toml` (`[project] version`);
-`fastjsonpatch.__version__` reads it from the installed package. `Cargo.toml` is not
-published and can stay at 0.1.0.
+The published version comes from `pyproject.toml` (`[project] version`);
+`fastjsonpatch.__version__` reads it from the installed package. Keep `Cargo.toml`
+and `Cargo.lock` at the same version (they ship in the sdist).
 
 ## Releasing
 
-1. Update the version in `pyproject.toml` and `CHANGELOG.md`; merge to `main` with green CI.
+1. In a pull request, update the version in `pyproject.toml`, `Cargo.toml` (and
+   `Cargo.lock`) and `CHANGELOG.md`; merge it with a green `ci-ok`.
 2. Optional dry run: Actions → CI → "Run workflow" with target `testpypi`, then
    `pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ fastjsonpatch`.
    A version number can be uploaded to TestPyPI only once as well, so use a dev
    version (e.g. `0.1.1.dev1`) for dry runs.
-3. `git tag v0.1.1 && git push origin v0.1.1`. CI checks that the tag equals the
-   version, builds every wheel and the sdist, and publishes to PyPI.
+3. On the merged `main` commit: `git tag v0.1.1 && git push origin v0.1.1`. CI checks
+   that the tag equals the version and builds every wheel and the sdist; the publish
+   job then waits for approval in the `pypi` environment (Actions → the run →
+   Review deployments) and uploads to PyPI.
 
 A version uploaded to PyPI can be yanked (hidden from new installs) but its number can
 never be reused. Fix mistakes with a new PATCH release.
