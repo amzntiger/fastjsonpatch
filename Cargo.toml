@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 ahash = "0.8.12"
-pyo3 = { version = "0.29.3", features = ["extension-module", "abi3-py312"] }
+pyo3 = { version = "0.29.3", features = ["extension-module", "abi3-py310"] }
 
 [lib]
 name = "_core"

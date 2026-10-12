@@ -25,7 +25,7 @@ jsonpatch.apply_patch(src, [{"op": "remove", "path": "/ports/0"}])
 # {'name': 'web', 'replicas': 3, 'ports': [443]}
 ```
 
-Requires CPython 3.12+. Wheels are published for Linux (x86_64, aarch64; glibc and
+Requires CPython 3.10+. Wheels are published for Linux (x86_64, aarch64; glibc and
 musl), macOS (arm64, x86_64) and Windows (x64). The only dependency is `jsonpointer`.
 
 ## Performance
@@ -73,7 +73,7 @@ Known differences:
 About 1,580 tests: randomized comparisons against jsonpatch 1.34 (patches, documents
 and errors), jsonpatch's own test suite and doctests, and the
 [json-patch-tests](https://github.com/json-patch/json-patch-tests) RFC 6902 suite.
-CI runs them with Python 3.12-3.14 on Linux (x86_64, aarch64; glibc), macOS (arm64,
+CI runs them with Python 3.10-3.14 on Linux (x86_64, aarch64; glibc), macOS (arm64,
 x86_64) and Windows (x64); the musl wheels are built but not tested in CI.
 
 ## License

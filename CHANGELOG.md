@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Python 3.10 and 3.11 are supported: the wheels now use the stable ABI from 3.10
+  (`abi3-py310`), so one wheel per platform covers Python 3.10 and later. CI tests
+  3.10 to 3.14.
+
 ## 0.1.4 (2026-10-12)
 
 - `import fastjsonpatch` takes about 11 ms instead of about 53 ms: `__version__` now

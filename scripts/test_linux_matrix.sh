@@ -14,7 +14,7 @@ out="${1:-linux-matrix.jsonl}"
 shift || true
 images=("$@")
 if [ ${#images[@]} -eq 0 ]; then
-  images=(python:3.12-slim python:3.13-slim python:3.14-slim
+  images=(python:3.10-slim python:3.11-slim python:3.12-slim python:3.13-slim python:3.14-slim
           python:3.12-alpine python:3.13-alpine python:3.14-alpine
           python:3.12-slim-bullseye)
 fi

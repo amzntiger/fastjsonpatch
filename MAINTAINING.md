@@ -28,10 +28,10 @@ python bench/compare.py      # speed vs jsonpatch
 - `tests/upstream/`: jsonpatch's own test suite and doctests, run against us.
 - `tests/rfc6902/`: the json-patch-tests conformance suite (Apache-2.0).
 - `scripts/test_linux_matrix.sh`: installs the built wheels in clean Docker images
-  (Debian/Alpine, Python 3.12-3.14) and runs everything there.
+  (Debian/Alpine, Python 3.10-3.14) and runs everything there.
 
 CI runs the tests and the speed comparison on Linux x86_64/arm64, macOS arm64/x86_64
-and Windows for Python 3.12, 3.13 and 3.14; the run's summary page has the table.
+and Windows for Python 3.10 to 3.14; the run's summary page has the table.
 
 ## Making changes
 
@@ -84,7 +84,7 @@ never be reused. Fix mistakes with a new PATCH release.
 - **New jsonpatch release:** install it, run the parity tests against it, port any
   behaviour changes (both the Python module and `src/lib.rs`), bump the test pin
   `jsonpatch==X` in `pyproject.toml`, and update `__jsonpatch_version__`.
-- **New Python version:** the wheels use the stable ABI (abi3, Python ≥ 3.12), so they
+- **New Python version:** the wheels use the stable ABI (abi3, Python ≥ 3.10), so they
   install on new Pythons without a rebuild. Add the version to the CI test matrix.
 - **Dropping a Python version:** change `requires-python` and the `abi3-py3XX`
   feature in `Cargo.toml` together, in a MINOR (0.x) or MAJOR release.
