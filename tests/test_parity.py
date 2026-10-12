@@ -213,11 +213,33 @@ def test_version_matches_the_installed_package():
     assert fastjsonpatch.__version__ == importlib.metadata.version("fastjsonpatch")
 
 
+_SPY_IMPORTLIB_METADATA = """
+import sys, traceback
+preloaded = "importlib.metadata" in sys.modules
+for name in [m for m in sys.modules if m == "importlib.metadata" or m.startswith("importlib.metadata.")]:
+    del sys.modules[name]
+importers = []
+
+class Spy:
+    def find_spec(self, name, path=None, target=None):
+        if name == "importlib.metadata":
+            importers.append("".join(traceback.format_stack(limit=15)))
+
+sys.meta_path.insert(0, Spy())
+import fastjsonpatch
+print("preloaded:", preloaded)
+print(importers[0] if importers else "")
+"""
+
+
 def test_import_does_not_load_importlib_metadata():
-    # importlib.metadata alone used to add ~30 ms to `import fastjsonpatch`
-    code = "import sys, fastjsonpatch; print('importlib.metadata' in sys.modules)"
-    out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True)
-    assert out.stdout.strip() == "False"
+    # importlib.metadata alone used to add ~30 ms to `import fastjsonpatch`. Some
+    # Python installs load it at startup (seen on macOS and Windows CI), so drop it
+    # from sys.modules first and record who imports it again.
+    out = subprocess.run([sys.executable, "-I", "-c", _SPY_IMPORTLIB_METADATA],
+                         capture_output=True, text=True, check=True)
+    preloaded, _, importer = out.stdout.partition("\n")
+    assert not importer.strip(), f"{preloaded}; importlib.metadata imported by:\n{importer}"
 
 
 def test_aliasing_preserved_like_deepcopy():
