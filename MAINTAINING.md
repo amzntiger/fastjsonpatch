@@ -5,6 +5,9 @@
 - `python/fastjsonpatch/__init__.py`: jsonpatch 1.35's module (BSD, notice kept), with
   `JsonPatch.__init__`, `from_diff` and `apply` routed to the Rust core when they can
   be reproduced exactly. Everything else is jsonpatch's code, unchanged.
+- `python/fastjsonpatch/cli.py`: jsonpatch 1.35's `jsonpatch_cli.py`, installed as
+  the `fastjsondiff` and `fastjsonpatch` commands.
+- `python/fastjsonpatch/__init__.pyi`: type hints for the public API (with `py.typed`).
 - `src/lib.rs`: the Rust core (PyO3). `diff` ports `DiffBuilder`; `apply` runs
   operations on plain dicts/lists and hands anything unusual back to the Python
   operation classes before mutating; `deepcopy` replaces `copy.deepcopy` for JSON.
@@ -19,7 +22,7 @@ jsonpatch 1.35. A behaviour difference is a bug, unless it is listed in the READ
 ```sh
 maturin develop --release
 pip install "jsonpatch==1.35" pytest
-pytest tests                 # ~1580 tests, a few seconds
+pytest tests                 # ~1650 tests, a few seconds
 python bench/compare.py      # speed vs jsonpatch
 ```
 
@@ -82,8 +85,11 @@ never be reused. Fix mistakes with a new PATCH release.
 ## Routine upkeep
 
 - **New jsonpatch release:** install it, run the parity tests against it, port any
-  behaviour changes (both the Python module and `src/lib.rs`), bump the test pin
-  `jsonpatch==X` in `pyproject.toml`, and update `__jsonpatch_version__`.
+  behaviour changes (the Python module, `cli.py` and `src/lib.rs`), bump the test pin
+  `jsonpatch==X` in `pyproject.toml`, and update `__jsonpatch_version__`. Update
+  `__init__.pyi` for changed signatures and check it with
+  `python -m mypy.stubtest fastjsonpatch` (with `ignore_missing_imports` for
+  jsonpointer, which has no type hints).
 - **New Python version:** the wheels use the stable ABI (abi3, Python ≥ 3.12), so they
   install on new Pythons without a rebuild. Add the version to the CI test matrix.
 - **Dropping a Python version:** change `requires-python` and the `abi3-py3XX`

@@ -22,12 +22,17 @@ classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
 ]
 
 [project.urls]
 Repository = "https://github.com/amzntiger/fastjsonpatch"
 Issues = "https://github.com/amzntiger/fastjsonpatch/issues"
 Changelog = "https://github.com/amzntiger/fastjsonpatch/blob/main/CHANGELOG.md"
+
+[project.scripts]
+fastjsondiff = "fastjsonpatch.cli:jsondiff_main"
+fastjsonpatch = "fastjsonpatch.cli:jsonpatch_main"
 
 [project.optional-dependencies]
 # jsonpatch is the reference implementation the parity tests compare against.
