@@ -1,7 +1,7 @@
 # jsonpatch 1.35's own test suite (tests.py from the jsonpatch sdist), run against
-# fastjsonpatch. Changes from upstream: the import below, tests.js is read from this
-# file's directory, and CommandLineTests (jsonpatch's CLI, which fastjsonpatch does
-# not ship) is left out.
+# fastjsonpatch. Changes from upstream: the imports below, tests.js is read from this
+# file's directory, and CommandLineTests runs fastjsonpatch.cli, whose programs are
+# named fastjsondiff and fastjsonpatch.
 #
 # Copyright (c) 2011 Stefan Kögl <stefan@skoegl.net>, BSD license (see ../../LICENSE).
 #!/usr/bin/env python
@@ -13,6 +13,7 @@ import decimal
 import doctest
 import unittest
 import fastjsonpatch as jsonpatch
+import fastjsonpatch.cli as jsonpatch_cli
 import jsonpointer
 import random
 import sys
@@ -1812,6 +1813,147 @@ class CustomOperationTests(unittest.TestCase):
         self.assertIn('identity', patch.operations)
         res = patch.apply({})
         self.assertEqual(res, {})
+
+
+class CommandLineTests(unittest.TestCase):
+    """ The jsondiff and jsonpatch command line programs """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+
+    def write(self, name, value):
+        path = os.path.join(self.dir, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(value, f)
+        return path
+
+    def read(self, path):
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+
+    def run_script(self, script, *args, stdin=''):
+        env = dict(os.environ, PYTHONUTF8='1')
+        return subprocess.run(
+            [sys.executable, '-c',
+             'import fastjsonpatch.cli as c; c.{0}_main()'.format(script)]
+            + list(args),
+            input=stdin, capture_output=True, encoding='utf-8', env=env)
+
+    def test_jsondiff(self):
+        src = self.write('a.json', {'a': [1, 2], 'b': 0})
+        dst = self.write('b.json', {'a': [1, 2, 3], 'c': 100})
+        res = self.run_script('jsondiff', src, dst)
+        # like diff, it exits with 1 if the files differ
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertEqual(res.stdout.count('\n'), 1)
+        patch = json.loads(res.stdout)
+        self.assertEqual(jsonpatch.apply_patch(self.read(src), patch), self.read(dst))
+
+    def test_jsondiff_equal_files(self):
+        src = self.write('a.json', {'a': [1, 2]})
+        dst = self.write('b.json', {'a': [1, 2]})
+        res = self.run_script('jsondiff', src, dst)
+        self.assertEqual((res.returncode, res.stdout), (0, ''), res.stderr)
+
+    def test_jsondiff_indent(self):
+        src = self.write('a.json', {'a': 1})
+        dst = self.write('b.json', {'b': 1})
+        res = self.run_script('jsondiff', '--indent', '2', src, dst)
+        patch = jsonpatch.make_patch({'a': 1}, {'b': 1}).patch
+        self.assertEqual(res.stdout, json.dumps(patch, indent=2) + '\n')
+
+    def test_jsondiff_preserve_unicode(self):
+        src = self.write('a.json', {'a': 'x'})
+        dst = self.write('b.json', {'a': 'ä'})
+        self.assertIn('"\\u00e4"', self.run_script('jsondiff', src, dst).stdout)
+        self.assertIn('"ä"', self.run_script('jsondiff', '-u', src, dst).stdout)
+
+    def test_jsonpatch(self):
+        doc = self.write('doc.json', {'a': [1, 2], 'b': 0})
+        patch = self.write('patch.json', [{'op': 'add', 'path': '/a/-', 'value': 3},
+                                          {'op': 'remove', 'path': '/b'}])
+        res = self.run_script('jsonpatch', doc, patch)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout), {'a': [1, 2, 3]})
+        self.assertEqual(self.read(doc), {'a': [1, 2], 'b': 0})
+
+    def test_jsonpatch_patch_from_stdin(self):
+        doc = self.write('doc.json', {'a': 1})
+        res = self.run_script('jsonpatch', doc,
+                              stdin='[{"op": "replace", "path": "/a", "value": 2}]')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(res.stdout), {'a': 2})
+
+    def test_jsonpatch_indent_preserve_unicode(self):
+        doc = self.write('doc.json', {'a': 'x'})
+        patch = self.write('patch.json', [{'op': 'replace', 'path': '/a', 'value': 'ä'}])
+        res = self.run_script('jsonpatch', '--indent', '2', doc, patch)
+        self.assertEqual(res.stdout, json.dumps({'a': 'ä'}, indent=2) + '\n')
+        res = self.run_script('jsonpatch', '-u', doc, patch)
+        self.assertEqual(res.stdout, '{"a": "ä"}\n')
+
+    def test_jsonpatch_in_place(self):
+        doc = self.write('doc.json', {'a': 1})
+        patch = self.write('patch.json', [{'op': 'replace', 'path': '/a', 'value': 2}])
+        res = self.run_script('jsonpatch', '-i', doc, patch)
+        self.assertEqual((res.returncode, res.stdout), (0, ''), res.stderr)
+        self.assertEqual(self.read(doc), {'a': 2})
+        # the temporary file has been moved over the original
+        self.assertEqual(sorted(os.listdir(self.dir)), ['doc.json', 'patch.json'])
+
+    # 2026-10-11: Windows cannot replace the original while its input is open.
+    def test_jsonpatch_in_place_closes_original_before_rename(self):
+        doc = self.write('doc.json', {'a': 1})
+        patch = self.write('patch.json', [{'op': 'replace', 'path': '/a', 'value': 2}])
+        parser = jsonpatch_cli.jsonpatch_parser
+        args = parser.parse_args(['-i', doc, patch])
+        self.addCleanup(args.ORIGINAL.close)
+        self.addCleanup(args.PATCH.close)
+        rename = os.rename
+
+        def rename_closed_original(source, target):
+            self.assertTrue(args.ORIGINAL.closed)
+            return rename(source, target)
+
+        with mock.patch.object(parser, 'parse_args', return_value=args), \
+                mock.patch('os.rename', side_effect=rename_closed_original):
+            jsonpatch_cli.patch_files()
+        self.assertEqual(self.read(doc), {'a': 2})
+
+    @unittest.skipUnless(os.name == 'posix', 'needs POSIX file permissions')
+    def test_jsonpatch_in_place_keeps_permissions(self):
+        doc = self.write('doc.json', {'a': 1})
+        patch = self.write('patch.json', [{'op': 'replace', 'path': '/a', 'value': 2}])
+        os.chmod(doc, 0o640)
+        res = self.run_script('jsonpatch', '-i', doc, patch)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(stat.S_IMODE(os.stat(doc).st_mode), 0o640)
+
+    def test_jsonpatch_in_place_backup(self):
+        doc = self.write('doc.json', {'a': 1})
+        patch = self.write('patch.json', [{'op': 'replace', 'path': '/a', 'value': 2}])
+        res = self.run_script('jsonpatch', '-i', '-b', doc, patch)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.read(doc), {'a': 2})
+        self.assertEqual(self.read(doc + '.orig'), {'a': 1})
+
+    def test_jsonpatch_in_place_failing_patch(self):
+        # the patch is applied before the file is replaced, so it is kept
+        doc = self.write('doc.json', {'a': 1})
+        patch = self.write('patch.json', [{'op': 'remove', 'path': '/b'}])
+        res = self.run_script('jsonpatch', '-i', '-b', doc, patch)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('JsonPatchConflict', res.stderr)
+        self.assertEqual(self.read(doc), {'a': 1})
+        self.assertEqual(sorted(os.listdir(self.dir)), ['doc.json', 'patch.json'])
+
+    def test_version(self):
+        for script in ['jsondiff', 'jsonpatch']:
+            with self.subTest(script=script):
+                res = self.run_script(script, '--version')
+                self.assertEqual(res.stdout, 'fast{0} {1}\n'.format(script, jsonpatch.__version__))
 
 
 if __name__ == '__main__':

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `fastjsondiff` and `fastjsonpatch` commands: jsonpatch's `jsondiff` and `jsonpatch`,
+  renamed so that they do not clash with jsonpatch's when both are installed.
+- Type hints for the public API (`py.typed`).
+
 ## 0.2.0 (2026-10-12)
 
 Now matches jsonpatch 1.35 instead of 1.34: the same patches, documents and exceptions.

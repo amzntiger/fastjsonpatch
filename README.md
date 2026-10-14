@@ -25,6 +25,15 @@ jsonpatch.apply_patch(src, [{"op": "remove", "path": "/ports/0"}])
 # {'name': 'web', 'replicas': 3, 'ports': [443]}
 ```
 
+The package includes type hints (`py.typed`) and jsonpatch's `jsondiff` and
+`jsonpatch` commands as `fastjsondiff` and `fastjsonpatch`, renamed so that they do
+not clash with jsonpatch's when both are installed:
+
+```sh
+fastjsondiff old.json new.json > patch.json    # exits with 1 if the files differ
+fastjsonpatch old.json patch.json              # or -i to modify old.json in place
+```
+
 Requires CPython 3.12+. Wheels are published for Linux (x86_64, aarch64; glibc and
 musl), macOS (arm64, x86_64) and Windows (x64). The only dependency is `jsonpointer`
 (3.2 or later).
@@ -67,9 +76,9 @@ Known differences:
 
 ## Testing
 
-About 1,640 tests: randomized comparisons against jsonpatch 1.35 (patches, documents
-and errors), jsonpatch's own test suite (without its command-line tests) and doctests,
-and the
+About 1,650 tests: randomized comparisons against jsonpatch 1.35 (patches, documents
+and errors), jsonpatch's own test suite (its command-line tests run against
+`fastjsondiff` and `fastjsonpatch`) and doctests, and the
 [json-patch-tests](https://github.com/json-patch/json-patch-tests) RFC 6902 suite.
 CI runs them with Python 3.12-3.14 on Linux (x86_64, aarch64; glibc), macOS (arm64,
 x86_64) and Windows (x64); the musl wheels are built but not tested in CI.
