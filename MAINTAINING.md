@@ -94,6 +94,10 @@ and `Cargo.lock` at the same version (they ship in the sdist).
    job then waits for approval in the `pypi` environment (Actions → the run →
    Review deployments) and uploads to PyPI.
 
+Pre-releases: `pyproject.toml` says `1.0.0rc1` (PEP 440), `Cargo.toml` and `Cargo.lock` say
+`1.0.0-rc.1` (semver); the Rust code converts, so `__version__` equals the wheel's. The tag
+is `v1.0.0rc1`. pip installs a pre-release only with `--pre` or an exact version.
+
 A version uploaded to PyPI can be yanked (hidden from new installs) but its number can
 never be reused. Fix mistakes with a new PATCH release.
 

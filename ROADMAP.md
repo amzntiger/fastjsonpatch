@@ -1,6 +1,6 @@
 # Roadmap
 
-Direction: stay a drop-in replacement for jsonpatch through 0.x, then become an
+Direction: stayed compatible with jsonpatch through 0.x (done, 0.3.0), becomes an
 independent library at 1.0. Dates are not promised; the order is.
 
 ## 0.x: compatible with jsonpatch
@@ -22,16 +22,16 @@ Done when: we have used it long enough without behaviour bugs to commit to 1.0.
 1.0 is the first release that may differ from jsonpatch on purpose. It is a MAJOR
 release and has a migration guide.
 
-- **Own the code:** the operation classes, exceptions and CLI move out of the copied
+- ✅ **Own the code:** the operation classes, exceptions and CLI move out of the copied
   jsonpatch module into this package.
-- **Own the pointer:** a JSON Pointer (RFC 6901) implementation in Rust replaces
+- ✅ **Own the pointer:** a JSON Pointer (RFC 6901) implementation in Rust replaces
   `jsonpointer`; the package then has no runtime Python dependency.
-- **Own the tests:** parity tests compare with stored expected results instead of
+- ✅ **Own the tests:** parity tests compare with stored expected results instead of
   running jsonpatch. jsonpatch stays an optional check, not a requirement. RFC 6902
   conformance (`tests/rfc6902/`) stays required.
-- **Decide the differences:** go through the `1.0` issues and choose, one by one,
+- ✅ **Decide the differences:** go through the `1.0` issues and choose, one by one,
   keep or change. Each change is listed in the changelog and the migration guide.
-- **Say what we are:** README and `MAINTAINING.md` stop describing the package as
+- ✅ **Say what we are:** README and `MAINTAINING.md` stop describing the package as
   jsonpatch with a Rust core; "The rule" is rewritten as our own compatibility policy.
 
 Done when: no runtime dependencies, tests pass without jsonpatch installed, every

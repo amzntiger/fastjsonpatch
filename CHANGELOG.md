@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased (1.0)
+## 1.0.0rc1 (2026-10-15)
+
+Release candidate for 1.0: `pip install --pre fastjsonpatch`.
 
 Changes that need a MAJOR release; each one is in [MIGRATION.md](MIGRATION.md).
 
