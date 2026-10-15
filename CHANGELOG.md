@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Tests no longer need jsonpatch: they compare with jsonpatch 1.35's results stored in
+  `tests/golden/`. `scripts/make_golden.py --check` (run in CI) verifies the stored
+  results against jsonpatch. The `test` extra is now just pytest; jsonpatch is in the
+  new `reference` extra.
+
 ## 0.3.0 (2026-10-14)
 
 - `fastjsondiff` and `fastjsonpatch` commands: jsonpatch's `jsondiff` and `jsonpatch`,

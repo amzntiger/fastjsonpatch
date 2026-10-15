@@ -1,5 +1,5 @@
 # jsonpatch 1.35's own test suite (tests.py from the jsonpatch sdist), run against
-# fastjsonpatch. Changes from upstream: the imports below, tests.js is read from this
+# fastjsonpatch. Changes from upstream: the imports below, the module patched by mock is fastjsonpatch, tests.js is read from this
 # file's directory, and CommandLineTests runs fastjsonpatch.cli, whose programs are
 # named fastjsondiff and fastjsonpatch.
 #
@@ -1241,7 +1241,7 @@ class OptimizationTests(unittest.TestCase):
         while only two items differ by position """
         src = [i % 150 for i in range(20000)]
         dst = [-1] + src[1:-1] + [-2]
-        with mock.patch('jsonpatch.SequenceMatcher',
+        with mock.patch('fastjsonpatch.SequenceMatcher',
                         side_effect=AssertionError('matched up')):
             patch = jsonpatch.make_patch(src, dst)
         self.assertEqual(len(patch.patch), 2)

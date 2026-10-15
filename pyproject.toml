@@ -35,8 +35,10 @@ fastjsondiff = "fastjsonpatch.cli:jsondiff_main"
 fastjsonpatch = "fastjsonpatch.cli:jsonpatch_main"
 
 [project.optional-dependencies]
-# jsonpatch is the reference implementation the parity tests compare against.
-test = ["pytest", "jsonpatch==1.35"]
+test = ["pytest"]
+# The reference implementation: for scripts/make_golden.py and bench/compare.py. The
+# tests compare with results stored in tests/golden/ and do not need it.
+reference = ["jsonpatch==1.35"]
 
 [tool.maturin]
 python-source = "python"
