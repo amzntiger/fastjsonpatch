@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-10-14)
 
 - `fastjsondiff` and `fastjsonpatch` commands: jsonpatch's `jsondiff` and `jsonpatch`,
   renamed so that they do not clash with jsonpatch's when both are installed.
