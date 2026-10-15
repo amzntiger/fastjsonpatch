@@ -1,5 +1,5 @@
 # jsonpatch 1.35's own test suite (tests.py from the jsonpatch sdist), run against
-# fastjsonpatch. Changes from upstream: the imports below, the module patched by mock is fastjsonpatch, tests.js is read from this
+# fastjsonpatch. Changes from upstream: the imports below, the module patched by mock is fastjsonpatch, jsonpointer is fastjsonpatch.pointer, tests.js is read from this
 # file's directory, and CommandLineTests runs fastjsonpatch.cli, whose programs are
 # named fastjsondiff and fastjsonpatch.
 #
@@ -14,7 +14,7 @@ import doctest
 import unittest
 import fastjsonpatch as jsonpatch
 import fastjsonpatch.cli as jsonpatch_cli
-import jsonpointer
+import fastjsonpatch.pointer as jsonpointer
 import random
 import sys
 import os

@@ -2,7 +2,7 @@ BSD 3-Clause License
 
 Copyright (c) 2026, the fastjsonpatch authors
 Copyright (c) 2011 Stefan Kögl <stefan@skoegl.net> (jsonpatch, whose diff algorithm
-src/lib.rs ports)
+src/lib.rs ports, and jsonpointer, whose code is in python/fastjsonpatch/pointer.py)
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
 

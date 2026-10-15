@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## Unreleased (1.0)
+
+Changes that need a MAJOR release; each one is in [MIGRATION.md](MIGRATION.md).
+
+- No dependencies: jsonpointer's code is in the package as `fastjsonpatch.pointer`
+  (jsonpointer 3.2.1, with its test suite). `fastjsonpatch.JsonPointer`,
+  `JsonPointerException` and the other names are the same names as before, but
+  `jsonpointer.JsonPointerException` is no longer the exception raised.
 
 - Tests no longer need jsonpatch: they compare with jsonpatch 1.35's results stored in
   `tests/golden/`. `scripts/make_golden.py --check` (run in CI) verifies the stored

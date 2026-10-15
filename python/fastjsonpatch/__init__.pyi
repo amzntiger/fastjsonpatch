@@ -1,7 +1,7 @@
 from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping, Sequence
 from typing import Any, ClassVar, Self, TypeVar
 
-from jsonpointer import JsonPointer
+from .pointer import JsonPointer as JsonPointer, JsonPointerException as JsonPointerException
 
 __version__: str
 __license__: str

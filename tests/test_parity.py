@@ -101,10 +101,11 @@ def test_public_api_matches_jsonpatch():
     assert set(GOLDEN["public_names"]) <= set(dir(fastjsonpatch))
 
 
-def test_standalone_does_not_import_jsonpatch():
-    code = "import sys, fastjsonpatch; fastjsonpatch.make_patch({}, {'a': 1}); print('jsonpatch' in sys.modules)"
+def test_standalone_does_not_import_jsonpatch_or_jsonpointer():
+    code = ("import sys, fastjsonpatch; fastjsonpatch.make_patch({}, {'a': 1}); "
+            "print('jsonpatch' in sys.modules, 'jsonpointer' in sys.modules)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
-    assert out.stdout.strip() == "False"
+    assert out.stdout.strip() == "False False"
 
 
 def test_version_matches_the_installed_package():

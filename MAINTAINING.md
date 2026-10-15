@@ -11,8 +11,9 @@
 - `src/lib.rs`: the Rust core (PyO3). `diff` ports `DiffBuilder`; `apply` runs
   operations on plain dicts/lists and hands anything unusual back to the Python
   operation classes before mutating; `deepcopy` replaces `copy.deepcopy` for JSON.
-- Runtime dependency: `jsonpointer` only. `jsonpatch` is a test dependency: it is the
-  reference the parity tests compare against.
+- `python/fastjsonpatch/pointer.py`: python-json-pointer 3.2.1 (BSD), with
+  `pointer.pyi`. No runtime dependencies; jsonpatch and jsonpointer are only needed by
+  `scripts/make_golden.py` and `bench/compare.py` (`reference` extra).
 
 **The rule:** fastjsonpatch must return the same patches, documents and exceptions as
 jsonpatch 1.35. A behaviour difference is a bug, unless it is listed in the README.
@@ -97,12 +98,15 @@ never be reused. Fix mistakes with a new PATCH release.
   the `reference` pin `jsonpatch==X` in `pyproject.toml`, and update
   `__jsonpatch_version__`. Update
   `__init__.pyi` for changed signatures and check it with
-  `python -m mypy.stubtest fastjsonpatch` (with `ignore_missing_imports` for
-  jsonpointer, which has no type hints).
+  `python -m mypy.stubtest fastjsonpatch` (run it outside the repository directory,
+  or mypy sees the package twice).
 - **New Python version:** the wheels use the stable ABI (abi3, Python ≥ 3.12), so they
   install on new Pythons without a rebuild. Add the version to the CI test matrix.
 - **Dropping a Python version:** change `requires-python` and the `abi3-py3XX`
   feature in `Cargo.toml` together, in a MINOR (0.x) or MAJOR release.
+- **jsonpointer release:** the copy in `pointer.py` follows jsonpointer 3.2.1. Diff a
+  new release against it, port what matters, and port its `tests.py` to
+  `tests/upstream/test_pointer_upstream.py`.
 - **Rust dependencies (PyO3, ahash):** `cargo update`, run the tests, then
   `python scripts/third_party_licenses.py` to refresh `THIRD_PARTY_LICENSES.md`.
 - **Bug reports:** reproduce with jsonpatch first. If jsonpatch behaves the same,
