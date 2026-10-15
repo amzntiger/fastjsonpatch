@@ -89,6 +89,11 @@ def test_dash_key(case, expected):
         assert repr(target) == want["doc_after"]
 
 
+@pytest.mark.parametrize("name", sorted(small_cases.PROBES))
+def test_probes(name):
+    assert outcome(lambda: small_cases.PROBES[name](fastjsonpatch)) == GOLDEN["probes"][name]
+
+
 def test_exceptions_have_the_same_hierarchy():
     with pytest.raises(fastjsonpatch.JsonPatchConflict):
         fastjsonpatch.apply_patch({}, [{"op": "remove", "path": "/a"}])

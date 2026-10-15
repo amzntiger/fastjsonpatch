@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "fastjsonpatch"
 version = "0.3.0"
-description = "Drop-in faster jsonpatch (RFC 6902): make_patch and apply in Rust"
+description = "JSON Patch (RFC 6902) with make_patch and apply in Rust; the API of jsonpatch, no dependencies"
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE", "THIRD_PARTY_LICENSES.md"]

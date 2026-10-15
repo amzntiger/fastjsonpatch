@@ -17,9 +17,10 @@
   `pointer.pyi`. No runtime dependencies; jsonpatch and jsonpointer are only needed by
   `scripts/make_golden.py` and `bench/compare.py` (`reference` extra).
 
-**The rule:** fastjsonpatch must return the same patches, documents and exceptions as
-jsonpatch 1.35. A behaviour difference is a bug, unless it is listed in the README and
-MIGRATION.md. Each listed difference has a test that pins it, and the golden tests
+**The rule (compatibility policy):** fastjsonpatch returns the same patches, documents
+and exceptions as jsonpatch 1.35 and follows RFC 6902. Where they disagree, the RFC
+wins. A behaviour difference from jsonpatch is a bug, unless it is listed in the README
+and MIGRATION.md. Each listed difference has a test that pins it, and the golden tests
 account for it (`small_cases.canon` for numbers, `small_cases.as_jsonpatch` for error
 messages): a case that can differ is compared with what jsonpatch gives for the
 normalized input, every other case exactly.

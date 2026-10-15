@@ -26,7 +26,10 @@ for image in "${images[@]}"; do
       "$image" sh -c '
         set -e
         pip install -q --no-cache-dir --disable-pip-version-check --root-user-action=ignore \
-          --only-binary=:all: --find-links /dist fastjsonpatch pytest "jsonpatch==1.35" >&2
+          --only-binary=:all: pytest "jsonpatch==1.35" >&2
+        # --no-index: with PyPI, pip prefers its wheel of the same version over /dist
+        pip install -q --no-cache-dir --disable-pip-version-check --root-user-action=ignore \
+          --no-index --find-links /dist fastjsonpatch >&2
         cp -r /src /work && cd /work
         result=$(python -m pytest -q -p no:cacheprovider tests 2>&1 | tail -1)
         echo "$result" >&2
