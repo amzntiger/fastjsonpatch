@@ -1603,6 +1603,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_deepcopy, m)?)?;
     // The package version, so `fastjsonpatch.__version__` needs no importlib.metadata.
-    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // Cargo writes pre-releases as semver (1.0.0-rc.1), PyPI as PEP 440 (1.0.0rc1).
+    let version = env!("CARGO_PKG_VERSION")
+        .replace("-alpha.", "a")
+        .replace("-beta.", "b")
+        .replace("-rc.", "rc");
+    m.add("__version__", version)?;
     Ok(())
 }

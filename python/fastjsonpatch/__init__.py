@@ -30,7 +30,7 @@
 # THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-"""Apply JSON-Patches (RFC 6902) - a faster drop-in for jsonpatch 1.35.
+"""Apply JSON-Patches (RFC 6902) - JSON Patch with the API of jsonpatch 1.35, with its hot paths in Rust.
 
 This module is derived from jsonpatch 1.35 (BSD, notice above) and maintained here, with
 its hot paths in Rust (``fastjsonpatch._core``):
