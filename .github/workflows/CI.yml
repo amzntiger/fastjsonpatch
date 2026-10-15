@@ -48,12 +48,17 @@ jobs:
           # PyPI wheel of the same version and platform tag over the local one.
           wheel=$(ls dist/*.whl)
           python -m pip install "${wheel}[test]"
-      - name: Tests (parity with jsonpatch, upstream suite, RFC 6902 suite)
+      - name: Tests (parity with jsonpatch's stored results, upstream suite, RFC 6902 suite)
         shell: bash
         run: |
           mkdir -p results
           python -m pytest -q -p no:cacheprovider tests 2>&1 | tee pytest.log
           tail -1 pytest.log > results/tests.txt
+      - name: Stored results still match jsonpatch 1.35
+        shell: bash
+        run: |
+          python -m pip install "jsonpatch==1.35"
+          python scripts/make_golden.py --check
       - name: Speed vs jsonpatch
         shell: bash
         run: |

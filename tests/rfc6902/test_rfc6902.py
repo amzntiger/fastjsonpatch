@@ -1,6 +1,6 @@
 """The json-patch-tests conformance suite (RFC 6902) and cases for the parts of the RFC
-that jsonpatch 1.34 did not follow, checked against the expected results and, when
-jsonpatch is installed, against jsonpatch's own behaviour."""
+that jsonpatch 1.34 did not follow, checked against the expected results and against
+what jsonpatch 1.35 does (tests/golden/rfc6902.json, made by scripts/make_golden.py)."""
 import copy
 import json
 import os
@@ -9,12 +9,8 @@ import pytest
 
 import fastjsonpatch
 
-try:
-    import jsonpatch
-except ImportError:  # the reference is optional for this suite
-    jsonpatch = None
-
 HERE = os.path.dirname(__file__)
+GOLDEN = json.load(open(os.path.join(HERE, "..", "golden", "rfc6902.json"), encoding="utf-8"))
 
 
 def runnable(case):
@@ -52,11 +48,12 @@ RFC_CASES = [
 ]
 
 CASES = [
-    pytest.param(case, id=f"{name}:{i}:{case.get('comment', '')[:50]}")
+    (case, f"{name}:{i}:{case.get('comment', '')[:50]}")
     for name in ("tests.json", "spec_tests.json")
     for i, case in enumerate(json.load(open(os.path.join(HERE, name), encoding="utf-8")))
     if runnable(case)
-] + [pytest.param(case, id=f"rfc:{i}:{case['comment'][:50]}") for i, case in enumerate(RFC_CASES)]
+] + [(case, f"rfc:{i}:{case['comment'][:50]}") for i, case in enumerate(RFC_CASES)]
+# The same list, in the same order, as scripts/make_golden.py reads it: GOLDEN[i] is CASES[i]
 
 
 def json_equal(a, b):
@@ -75,19 +72,19 @@ def json_equal(a, b):
     return type(a) is type(b) and not isinstance(a, (dict, list)) and a == b
 
 
-def outcome(mod, case):
+def outcome(case):
     try:
-        return "ok", mod.apply_patch(copy.deepcopy(case["doc"]), copy.deepcopy(case["patch"]))
+        return "ok", fastjsonpatch.apply_patch(copy.deepcopy(case["doc"]), copy.deepcopy(case["patch"]))
     except Exception as e:  # noqa: BLE001 - comparing any failure
         return type(e).__name__, str(e)
 
 
-@pytest.mark.parametrize("case", CASES)
-def test_case(case):
-    kind, result = outcome(fastjsonpatch, case)
+@pytest.mark.parametrize("index", range(len(CASES)), ids=[name for _, name in CASES])
+def test_case(index):
+    case = CASES[index][0]
+    kind, result = outcome(case)
     if "expected" in case:
         assert kind == "ok" and json_equal(result, case["expected"]), (kind, result)
     elif "error" in case:
         assert kind != "ok"
-    if jsonpatch is not None:
-        assert repr((kind, result)) == repr(outcome(jsonpatch, case))
+    assert [kind, repr(result) if kind == "ok" else result] == GOLDEN[index]  # what jsonpatch 1.35 does

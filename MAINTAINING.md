@@ -21,13 +21,20 @@ jsonpatch 1.35. A behaviour difference is a bug, unless it is listed in the READ
 
 ```sh
 maturin develop --release
-pip install "jsonpatch==1.35" pytest
-pytest tests                 # ~1650 tests, a few seconds
-python bench/compare.py      # speed vs jsonpatch
+pip install pytest
+pytest tests                 # ~1650 tests, a few seconds; jsonpatch is not needed
+pip install "jsonpatch==1.35"
+python scripts/make_golden.py --check   # stored results still equal jsonpatch's
+python bench/compare.py                 # speed vs jsonpatch
 ```
 
 - `tests/test_parity.py`: random documents, mutations and operations (valid and
-  invalid), compared with jsonpatch by `repr` and by exception type and message.
+  invalid) and small hand-written cases (`tests/small_cases.py`), compared by `repr`
+  and by exception type and message with what jsonpatch 1.35 returned, stored in
+  `tests/golden/*.json`. `scripts/make_golden.py` writes those files (new random
+  inputs) or, with `--check`, recomputes them from the stored inputs with jsonpatch.
+  When jsonpatch changes behaviour, run it without `--check`, review the diff of
+  `tests/golden/`, and port the change.
 - `tests/upstream/`: jsonpatch's own test suite and doctests, run against us.
 - `tests/rfc6902/`: the json-patch-tests conformance suite (Apache-2.0).
 - `scripts/test_linux_matrix.sh`: installs the built wheels in clean Docker images
@@ -84,9 +91,11 @@ never be reused. Fix mistakes with a new PATCH release.
 
 ## Routine upkeep
 
-- **New jsonpatch release:** install it, run the parity tests against it, port any
-  behaviour changes (the Python module, `cli.py` and `src/lib.rs`), bump the test pin
-  `jsonpatch==X` in `pyproject.toml`, and update `__jsonpatch_version__`. Update
+- **New jsonpatch release:** install it, run `python scripts/make_golden.py --check` to see
+  what changed, port the behaviour changes (the Python module, `cli.py` and
+  `src/lib.rs`), regenerate `tests/golden/` (and the `"jsonpatch"` version in it), bump
+  the `reference` pin `jsonpatch==X` in `pyproject.toml`, and update
+  `__jsonpatch_version__`. Update
   `__init__.pyi` for changed signatures and check it with
   `python -m mypy.stubtest fastjsonpatch` (with `ignore_missing_imports` for
   jsonpointer, which has no type hints).
