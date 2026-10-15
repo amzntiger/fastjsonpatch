@@ -2,10 +2,12 @@
 
 ## What the package is
 
-- `python/fastjsonpatch/__init__.py`: jsonpatch 1.35's module (BSD, notice kept), with
+- `python/fastjsonpatch/__init__.py`: derived from jsonpatch 1.35's module (BSD, notice
+  kept) and maintained here, with
   `JsonPatch.__init__`, `from_diff` and `apply` routed to the Rust core when they can
-  be reproduced exactly. Everything else is jsonpatch's code, unchanged.
-- `python/fastjsonpatch/cli.py`: jsonpatch 1.35's `jsonpatch_cli.py`, installed as
+  be reproduced exactly. Everything else is still jsonpatch 1.35's code; a change
+  there needs a test in `tests/` first.
+- `python/fastjsonpatch/cli.py`: derived from jsonpatch 1.35's `jsonpatch_cli.py`, installed as
   the `fastjsondiff` and `fastjsonpatch` commands.
 - `python/fastjsonpatch/__init__.pyi`: type hints for the public API (with `py.typed`).
 - `src/lib.rs`: the Rust core (PyO3). `diff` ports `DiffBuilder`; `apply` runs

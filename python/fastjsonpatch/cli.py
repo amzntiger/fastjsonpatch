@@ -1,5 +1,5 @@
-# jsonpatch 1.35's jsonpatch_cli.py, as the fastjsondiff and fastjsonpatch commands.
-# Changes from upstream: the import of fastjsonpatch and the program names.
+# The fastjsondiff and fastjsonpatch commands, derived from jsonpatch 1.35's
+# jsonpatch_cli.py and maintained here. Changes from upstream: the import of fastjsonpatch and the program names.
 #
 # Copyright (c) 2011 Stefan Kögl <stefan@skoegl.net>, BSD license (see LICENSE).
 # -*- coding: utf-8 -*-
