@@ -174,6 +174,10 @@ def rfc_outcome(case):
     return outcome(lambda: jsonpatch.apply_patch(copy.deepcopy(case["doc"]), copy.deepcopy(case["patch"])))
 
 
+def probe_outcomes():
+    return {name: outcome(lambda: probe(jsonpatch)) for name, probe in small_cases.PROBES.items()}
+
+
 def public_names():
     return sorted(n for n in dir(jsonpatch) if not n.startswith("__"))
 
@@ -219,6 +223,7 @@ def build(inputs):
         "invalid_patches": [invalid_patch_outcome(p) for p in small_cases.INVALID_PATCHES],
         "dash_key": [dash_key_case(d, p) for d, p in small_cases.DASH_KEY],
         "non_json": [non_json_case(s, d) for s, d in small_cases.NON_JSON],
+        "probes": probe_outcomes(),
         "public_names": public_names(),
     }
 
