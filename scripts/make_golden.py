@@ -168,11 +168,6 @@ def non_json_case(src, dst):
             "add": outcome(lambda: jsonpatch.apply_patch(src, small_cases.NON_JSON_ADD))}
 
 
-def deep_outcome(n):
-    src, _ = small_cases.deep(n)
-    return outcome(lambda: len(jsonpatch.make_patch(src, [1]).patch))
-
-
 def rfc_outcome(case):
     return outcome(lambda: jsonpatch.apply_patch(copy.deepcopy(case["doc"]), copy.deepcopy(case["patch"])))
 
@@ -222,7 +217,6 @@ def build(inputs):
         "invalid_patches": [invalid_patch_outcome(p) for p in small_cases.INVALID_PATCHES],
         "dash_key": [dash_key_case(d, p) for d, p in small_cases.DASH_KEY],
         "non_json": [non_json_case(s, d) for s, d in small_cases.NON_JSON],
-        "deep": deep_outcome(3000),
         "public_names": public_names(),
     }
 

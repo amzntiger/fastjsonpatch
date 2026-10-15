@@ -171,8 +171,11 @@ def test_custom_dumps_and_subclass_fall_back():
 
 
 def test_deep_nesting_falls_back():
+    # jsonpatch takes the patch (1 operation) or runs out of Python stack, depending on
+    # the Python version and platform; either way fastjsonpatch must not crash.
     src, _ = small_cases.deep(3000)
-    assert outcome(lambda: len(fastjsonpatch.make_patch(src, [1]).patch)) == GOLDEN["deep"]
+    kind, result = outcome(lambda: len(fastjsonpatch.make_patch(src, [1]).patch))
+    assert (kind, result) == ("ok", "1") or kind == "RecursionError"
 
 
 def test_string_patch_and_equality():
