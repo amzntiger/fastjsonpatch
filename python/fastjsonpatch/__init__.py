@@ -56,9 +56,8 @@ from collections.abc import Mapping, MutableMapping, MutableSequence, Sequence
 from difflib import SequenceMatcher
 from types import MappingProxyType
 
-from jsonpointer import JsonPointer, JsonPointerException
-
 from . import _core
+from .pointer import JsonPointer, JsonPointerException
 
 
 _ST_ADD = 0

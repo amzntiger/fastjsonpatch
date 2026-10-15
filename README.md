@@ -35,8 +35,7 @@ fastjsonpatch old.json patch.json              # or -i to modify old.json in pla
 ```
 
 Requires CPython 3.12+. Wheels are published for Linux (x86_64, aarch64; glibc and
-musl), macOS (arm64, x86_64) and Windows (x64). The only dependency is `jsonpointer`
-(3.2 or later).
+musl), macOS (arm64, x86_64) and Windows (x64). There are no dependencies.
 
 ## Performance
 
