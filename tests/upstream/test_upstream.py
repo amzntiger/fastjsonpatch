@@ -1,7 +1,10 @@
 # jsonpatch 1.35's own test suite (tests.py from the jsonpatch sdist), run against
-# fastjsonpatch. Changes from upstream: the imports below, the module patched by mock is fastjsonpatch, jsonpointer is fastjsonpatch.pointer, tests.js is read from this
-# file's directory, and CommandLineTests runs fastjsonpatch.cli, whose programs are
-# named fastjsondiff and fastjsonpatch.
+# fastjsonpatch. Changes from upstream: the imports below; tests.js is read from this
+# file's directory; the module patched by mock is fastjsonpatch and jsonpointer is
+# fastjsonpatch.pointer; CommandLineTests runs fastjsonpatch.cli, whose programs are
+# named fastjsondiff and fastjsonpatch; 1 and 1.0 are the same number (RFC 6902, 4.6):
+# test_issue103 and test_move_only_values_equal_in_json are changed, and
+# test_numbers_are_compared_by_value is added.
 #
 # Copyright (c) 2011 Stefan Kögl <stefan@skoegl.net>, BSD license (see ../../LICENSE).
 #!/usr/bin/env python
@@ -742,13 +745,15 @@ class MakePatchTestCase(unittest.TestCase):
         self.assertIsInstance(res['B']['C'], bool)
 
     def test_issue103(self):
-        """In JSON 1 is different from 1.0 even though in python 1 == 1.0"""
+        """CHANGED from jsonpatch, which patches 1 to 1.0: in JSON 1 and 1.0 are
+        the same number (RFC 6902, 4.6), so there is nothing to patch"""
         src = {'A': 1}
         dst = {'A': 1.0}
         patch = jsonpatch.make_patch(src, dst)
+        self.assertEqual(patch.patch, [])
         res = jsonpatch.apply_patch(src, patch)
         self.assertEqual(res, dst)
-        self.assertIsInstance(res['A'], float)
+        self.assertIsInstance(res['A'], int)
 
     def test_issue180(self):
         """In JSON 1 is different from True in list items even though in python 1 == True"""
@@ -769,8 +774,6 @@ class MakePatchTestCase(unittest.TestCase):
             ({'a': [1]}, {'b': [True]}),
             ({'a': {'x': 1}}, {'b': {'x': True}}),
             ([[1], 0], [0, [True]]),
-            ({'a': [1]}, {'b': [1.0]}),
-            ({'a': 0.0}, {'b': -0.0}),
             # member names that are not strings are serialized, too
             ({'a': {1: 'v'}}, {'b': {True: 'v'}}),
         ]
@@ -779,6 +782,24 @@ class MakePatchTestCase(unittest.TestCase):
                 patch = jsonpatch.make_patch(src, dst)
                 res = patch.apply(src)
                 self.assertEqual(json.dumps(res), json.dumps(dst))
+
+    def test_numbers_are_compared_by_value(self):
+        """ADDED: 1, 1.0 and -0.0 are the same number as 1 and 0 (RFC 6902, 4.6)"""
+        cases = [
+            ({'a': [1]}, {'b': [1.0]}),
+            ({'a': 0.0}, {'b': -0.0}),
+            ({'a': 0}, {'b': -0.0}),
+            ({'a': 10 ** 20}, {'b': 1e20}),
+            ([1, 2], [2.0, 1.0]),
+        ]
+        for src, dst in cases:
+            with self.subTest(src=src, dst=dst):
+                patch = jsonpatch.make_patch(src, dst)
+                self.assertTrue(all(op['op'] == 'move' for op in patch.patch))
+                self.assertEqual(patch.apply(src), dst)
+        for src, dst in [(1, 1.5), (2 ** 53 + 1, float(2 ** 53)), (1, True), (0, False)]:
+            with self.subTest(src=src, dst=dst):
+                self.assertEqual([op['op'] for op in jsonpatch.make_patch([src], [dst]).patch], ['replace'])
 
     def test_move_only_values_equal_in_given_dumps(self):
         """The given dumps decides which values are the same"""

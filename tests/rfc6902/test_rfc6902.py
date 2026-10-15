@@ -8,6 +8,7 @@ import os
 import pytest
 
 import fastjsonpatch
+import small_cases
 
 HERE = os.path.dirname(__file__)
 GOLDEN = json.load(open(os.path.join(HERE, "..", "golden", "rfc6902.json"), encoding="utf-8"))
@@ -76,7 +77,7 @@ def outcome(case):
     try:
         return "ok", fastjsonpatch.apply_patch(copy.deepcopy(case["doc"]), copy.deepcopy(case["patch"]))
     except Exception as e:  # noqa: BLE001 - comparing any failure
-        return type(e).__name__, str(e)
+        return type(e).__name__, small_cases.as_jsonpatch(str(e))
 
 
 @pytest.mark.parametrize("index", range(len(CASES)), ids=[name for _, name in CASES])

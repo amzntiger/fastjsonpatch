@@ -99,7 +99,32 @@ fn serializable(o: &Bound<'_, PyAny>, depth: usize) -> PyResult<bool> {
     })
 }
 
-/// `json.dumps(a) == json.dumps(b)` for values that are not both dicts or both lists.
+/// A float with a whole value, which `_number` makes an int.
+fn whole(x: f64) -> bool {
+    x.is_finite() && x.fract() == 0.0
+}
+
+/// `a` and `b`, both ints or floats, are the same number (RFC 6902, 4.6): 1 and 1.0
+/// are, every NaN is the same as every NaN (as in their `json.dumps`).
+fn same_number(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, ka: Kind, kb: Kind) -> R<bool> {
+    if ka == Kind::Int {
+        int_text(a)?;
+    }
+    if kb == Kind::Int {
+        int_text(b)?;
+    }
+    if ka == Kind::Float && kb == Kind::Float {
+        let (x, y) = (a.cast::<PyFloat>()?.value(), b.cast::<PyFloat>()?.value());
+        return Ok((x.is_nan() && y.is_nan()) || x == y);
+    }
+    Ok(a.is(b) || a.eq(b)?)
+}
+
+fn is_number(k: Kind) -> bool {
+    matches!(k, Kind::Int | Kind::Float)
+}
+
+/// `_same_scalar` for values that are not both dicts or both lists.
 fn json_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, depth: usize) -> R<bool> {
     let (ka, kb) = (kind(a), kind(b));
     if ka == Kind::Other || kb == Kind::Other {
@@ -115,14 +140,13 @@ fn json_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, depth: usize) -> R<bool> 
         }
         return Ok(false);
     }
+    if is_number(ka) && is_number(kb) {
+        return same_number(a, b, ka, kb);
+    }
     if ka != kb {
-        return Ok(false); // e.g. 1 vs 1.0 vs true: "1", "1.0", "true"
+        return Ok(false); // e.g. 1 vs true vs "1"
     }
     Ok(match ka {
-        Kind::Float => {
-            let (x, y) = (a.cast::<PyFloat>()?.value(), b.cast::<PyFloat>()?.value());
-            (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits()
-        }
         Kind::Null => true,
         _ => a.eq(b)?,
     })
@@ -329,6 +353,14 @@ fn encode(o: &Bound<'_, PyAny>, depth: usize, out: &mut Vec<u8>) -> R<()> {
             let x = o.cast::<PyFloat>()?.value();
             if x.is_nan() {
                 out.push(b'n'); // every NaN dumps as "NaN"
+            } else if whole(x) {
+                // the same as the int of that value
+                out.push(b'i');
+                if x.abs() < 9.0e18 {
+                    put_str(out, &(x as i64).to_string());
+                } else {
+                    put_str(out, o.call_method0("__int__")?.str()?.to_str()?);
+                }
             } else {
                 out.push(b'f');
                 out.extend_from_slice(&x.to_bits().to_le_bytes());
@@ -408,7 +440,12 @@ fn json_hash(o: &Bound<'_, PyAny>, depth: usize, rs: &ahash::RandomState) -> R<u
         }
         Kind::Float => {
             let x = o.cast::<PyFloat>()?.value();
-            (b'f', if x.is_nan() { 0 } else { x.to_bits() }, x.is_nan()).hash(&mut h);
+            if whole(x) {
+                // hash(1.0) == hash(1): the same as the int of that value
+                (b'i', o.hash()?).hash(&mut h);
+            } else {
+                (b'f', if x.is_nan() { 0 } else { x.to_bits() }, x.is_nan()).hash(&mut h);
+            }
         }
         Kind::Bool => (b'b', o.is_truthy()?).hash(&mut h),
         Kind::Null => b'z'.hash(&mut h),
@@ -426,6 +463,9 @@ fn same_json(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, depth: usize) -> R<bool
     let (ka, kb) = (kind(a), kind(b));
     if ka == Kind::Other || kb == Kind::Other {
         return Err(Fail::Unsupported);
+    }
+    if is_number(ka) && is_number(kb) {
+        return same_number(a, b, ka, kb);
     }
     if ka != kb {
         return Ok(false);
@@ -464,18 +504,9 @@ fn same_json(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, depth: usize) -> R<bool
             true
         }
         Kind::Str => a.is(b) || a.eq(b)?,
-        Kind::Int => {
-            int_text(a)?;
-            int_text(b)?;
-            a.is(b) || a.eq(b)?
-        }
-        Kind::Float => {
-            let (x, y) = (a.cast::<PyFloat>()?.value(), b.cast::<PyFloat>()?.value());
-            (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits()
-        }
         Kind::Bool => a.is(b),
         Kind::Null => true,
-        Kind::Other => unreachable!(),
+        Kind::Int | Kind::Float | Kind::Other => unreachable!(),
     })
 }
 

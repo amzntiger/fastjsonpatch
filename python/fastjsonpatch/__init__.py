@@ -722,6 +722,8 @@ class DiffBuilder(object):
 
     def __init__(self, src_doc, dst_doc, dumps=json.dumps, pointer_cls=JsonPointer):
         self.dumps = dumps
+        # With the default dumps, 1 and 1.0 are the same number, as in RFC 6902 4.6
+        self._numbers = dumps is json.dumps
         self.pointer_cls = pointer_cls
         self.index_storage = [{}, {}]
         self.__root = root = []
@@ -731,12 +733,19 @@ class DiffBuilder(object):
         self.arrays = {}
         root[:] = [root, root, None]
 
+    def _same_scalar(self, old, new):
+        """ Do old and new serialize equally? (1 and 1.0 are the same number
+        with the default dumps) """
+        if self._numbers:
+            old, new = _number(old), _number(new)
+        return self.dumps(old) == self.dumps(new)
+
     def _move_key(self, value):
         """ A key of value, which is equal for values that are equal in JSON,
         so that e.g. [1] is not moved where [true] is added """
         try:
             # Serialized like in _differing_runs
-            return self.dumps(_sorted_members(value))
+            return self.dumps(_sorted_members(value, self._numbers))
         except (TypeError, ValueError, RecursionError):
             # Values that cannot be serialized, e.g. as they contain
             # themselves, are only moved where they are added unchanged
@@ -933,8 +942,8 @@ class DiffBuilder(object):
         try:
             # Serialized like in _compare_values, so e.g. 1 and True differ,
             # but independent of the order of object members
-            src_keys = [self.dumps(_sorted_members(item)) for item in src]
-            dst_keys = [self.dumps(_sorted_members(item)) for item in dst]
+            src_keys = [self.dumps(_sorted_members(item, self._numbers)) for item in src]
+            dst_keys = [self.dumps(_sorted_members(item, self._numbers)) for item in dst]
         except (TypeError, ValueError, RecursionError):
             # Items that cannot be serialized are compared by position
             return [(0, len(src), 0, len(dst))]
@@ -1008,7 +1017,7 @@ class DiffBuilder(object):
                 # To ensure we catch changes to JSON, we can't rely on a
                 # simple old == new, because it would not recognize the
                 # difference between 1 and True, among other things.
-                elif self.dumps(old) == self.dumps(new):
+                elif self._same_scalar(old, new):
                     continue
 
                 else:
@@ -1037,7 +1046,7 @@ class DiffBuilder(object):
         # and ignore those that don't. The performance of this could be
         # improved by doing more direct type checks, but we'd need to be
         # careful to accept type changes that don't matter when JSONified.
-        elif self.dumps(src) == self.dumps(dst):
+        elif self._same_scalar(src, dst):
             return
 
         else:
@@ -1077,16 +1086,25 @@ def _json_equal(first, second):
     return first == second
 
 
-def _sorted_members(value):
+def _number(value):
+    """ A float with a whole value is the int of that value, so that 1.0 is
+    the same number as 1 (RFC 6902, 4.6) """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _sorted_members(value, numbers=False):
     """ Copies the arrays and objects in value, with the members of objects
-    sorted by key """
+    sorted by key, and with numbers as _number if asked for """
     # Most values are scalars, so they are checked for first
     if value is None or isinstance(value, (str, int, float)):
-        return value
+        return _number(value) if numbers else value
     if isinstance(value, MutableMapping):
-        return {key: _sorted_members(value[key]) for key in sorted(value)}
+        return {key: _sorted_members(value[key], numbers)
+                for key in sorted(value)}
     if isinstance(value, MutableSequence):
-        return [_sorted_members(item) for item in value]
+        return [_sorted_members(item, numbers) for item in value]
     return value
 
 
