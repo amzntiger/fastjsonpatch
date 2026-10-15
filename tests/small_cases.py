@@ -39,3 +39,26 @@ def deep(n):
     for _ in range(n):
         src, dst = [src], [dst]
     return src, dst
+
+
+def as_jsonpatch(message):
+    """An error message as jsonpatch 1.35 words it: the class of the end of an array is
+    fastjsonpatch.pointer.EndOfList here and jsonpointer.EndOfList there."""
+    return message.replace("fastjsonpatch.pointer.EndOfList", "jsonpointer.EndOfList")
+
+
+def canon(value):
+    """value with every float that has a whole value (1.0, -0.0, 1e20) as the int of that
+    value: fastjsonpatch compares numbers by value (RFC 6902, 4.6), jsonpatch 1.35 does
+    not, and jsonpatch gives fastjsonpatch's patch for canon(src), canon(dst)."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: canon(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [canon(v) for v in value]
+    return value
+
+
+def has_whole_float(value):
+    return repr(canon(value)) != repr(value)

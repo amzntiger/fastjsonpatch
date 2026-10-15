@@ -4,6 +4,12 @@
 
 Changes that need a MAJOR release; each one is in [MIGRATION.md](MIGRATION.md).
 
+- `make_patch` compares numbers by value, as RFC 6902 4.6 says: `1`, `1.0`, `-0.0` and
+  `1e20` are the same numbers as `1`, `1`, `0` and `10**20`. `make_patch({"a": 1},
+  {"a": 1.0})` is `[]` (it was a `replace`), and equal numbers in lists are matched up
+  and moved. `1` and `true` are still different. Speed is unchanged.
+- The error message for a pointer through the end of an array names
+  `fastjsonpatch.pointer.EndOfList` instead of `jsonpointer.EndOfList`.
 - No dependencies: jsonpointer's code is in the package as `fastjsonpatch.pointer`
   (jsonpointer 3.2.1, with its test suite). `fastjsonpatch.JsonPointer`,
   `JsonPointerException` and the other names are the same names as before, but

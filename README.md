@@ -64,8 +64,14 @@ non-JSON values, dict or list subclasses, nesting deeper than 1000, a custom `du
 or `json_dumper`, a custom `pointer_cls`, `operations` or `_get_operation` (for
 `apply`), and operations that would fail.
 
-Known differences:
+Known differences (see [MIGRATION.md](https://github.com/amzntiger/fastjsonpatch/blob/main/MIGRATION.md)):
 
+- `make_patch` compares numbers by value, as RFC 6902 (4.6) does: `1`, `1.0` and `-0.0`
+  are the numbers 1, 1 and 0, so `{"a": 1}` to `{"a": 1.0}` is an empty patch (jsonpatch
+  makes a `replace`). `1` and `true` are still different.
+- `JsonPointerException` is fastjsonpatch's own class, not jsonpointer's (there is no
+  dependency on jsonpointer), and the error message for a pointer through the end of an
+  array names `fastjsonpatch.pointer.EndOfList`.
 - The exception classes are fastjsonpatch's own, so
   `except fastjsonpatch.JsonPatchConflict` does not catch an exception raised by the `jsonpatch` package, and vice versa.
 - Values in a document that are not dicts, lists or JSON scalars are copied with
@@ -75,8 +81,8 @@ Known differences:
 
 ## Testing
 
-About 1,650 tests: randomized comparisons against jsonpatch 1.35 (patches, documents
-and errors), jsonpatch's own test suite (its command-line tests run against
+About 2,200 tests: comparisons with what jsonpatch 1.35 returned for random and
+hand-written inputs (patches, documents and errors; stored, so jsonpatch is not needed), jsonpatch's own test suite (its command-line tests run against
 `fastjsondiff` and `fastjsonpatch`) and doctests, and the
 [json-patch-tests](https://github.com/json-patch/json-patch-tests) RFC 6902 suite.
 CI runs them with Python 3.12-3.14 on Linux (x86_64, aarch64; glibc), macOS (arm64,

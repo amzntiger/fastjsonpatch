@@ -18,7 +18,11 @@
   `scripts/make_golden.py` and `bench/compare.py` (`reference` extra).
 
 **The rule:** fastjsonpatch must return the same patches, documents and exceptions as
-jsonpatch 1.35. A behaviour difference is a bug, unless it is listed in the README.
+jsonpatch 1.35. A behaviour difference is a bug, unless it is listed in the README and
+MIGRATION.md. Each listed difference has a test that pins it, and the golden tests
+account for it (`small_cases.canon` for numbers, `small_cases.as_jsonpatch` for error
+messages): a case that can differ is compared with what jsonpatch gives for the
+normalized input, every other case exactly.
 
 ## Tests
 

@@ -123,6 +123,7 @@ def make_patch_case(src, dst):
     in_place = copy.deepcopy(src)
     return {
         "src": src, "dst": dst, "patch": repr(ref.patch),
+        "patch_canon": repr(jsonpatch.make_patch(small_cases.canon(src), small_cases.canon(dst)).patch),
         "apply": outcome(lambda: ref.apply(src)),
         "in_place": outcome(lambda: ref.apply(in_place, in_place=True)),
         "in_place_doc": repr(in_place),
@@ -147,7 +148,8 @@ def single_op_case(op):
 
 def shuffle_case(src, dst):
     ref = jsonpatch.make_patch(src, dst)
-    return {"src": src, "dst": dst, "patch": repr(ref.patch), "apply": outcome(lambda: ref.apply(src))}
+    return {"src": src, "dst": dst, "patch": repr(ref.patch), "apply": outcome(lambda: ref.apply(src)),
+            "patch_canon": repr(jsonpatch.make_patch(small_cases.canon(src), small_cases.canon(dst)).patch)}
 
 
 def invalid_patch_outcome(patch):

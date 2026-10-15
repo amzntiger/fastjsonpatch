@@ -31,8 +31,7 @@
 """ Identify specific nodes in a JSON document (RFC 6901)
 
 This is python-json-pointer 3.2.1 (https://github.com/stefankoegl/python-json-pointer),
-unchanged except for this header and the `__module__` line after EndOfList.
-fastjsonpatch contains it so that it does not need
+unchanged except for this header. fastjsonpatch contains it so that it does not need
 the jsonpointer package; its tests are in tests/upstream/test_pointer_upstream.py.
 """
 
@@ -151,11 +150,6 @@ class EndOfList:
     def __repr__(self):
         return '{cls}({lst})'.format(cls=self.__class__.__name__,
                                      lst=repr(self.list_))
-
-
-# Error messages print the class (as "<class 'jsonpointer.EndOfList'>"); keep them as
-# jsonpatch's. To be reconsidered for 1.0.
-EndOfList.__module__ = 'jsonpointer'
 
 
 class JsonPointer:

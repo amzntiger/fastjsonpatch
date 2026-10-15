@@ -21,21 +21,35 @@ def outcome(fn):
     try:
         return ["ok", repr(fn())]
     except Exception as e:  # noqa: BLE001 - comparing any failure
-        return [type(e).__name__, str(e)]
+        return [type(e).__name__, small_cases.as_jsonpatch(str(e))]
 
 
 @pytest.mark.parametrize("case", GOLDEN["make_patch"], ids=lambda c: None)
 def test_make_patch_and_apply(case):
     src, dst = case["src"], case["dst"]
     got = fastjsonpatch.make_patch(src, dst)
-    assert repr(got.patch) == case["patch"]
     assert type(got) is fastjsonpatch.JsonPatch
+    assert repr(small_cases.canon(got.patch)) == case["patch_canon"]
     snapshot = repr(src)
+    if small_cases.has_whole_float(src) or small_cases.has_whole_float(dst):
+        # 1.0 is the number 1 here, not a change (RFC 6902, 4.6), unlike in jsonpatch 1.35
+        assert_makes(got, src, dst)
+        return
+    assert repr(got.patch) == case["patch"]
     assert outcome(lambda: got.apply(src)) == case["apply"]
     assert repr(src) == snapshot  # not in place: src untouched
     doc = copy.deepcopy(src)
     assert outcome(lambda: got.apply(doc, in_place=True)) == case["in_place"]
     assert repr(doc) == case["in_place_doc"]
+
+
+def assert_makes(patch, src, dst):
+    """patch turns src into a document equal to dst, as RFC 6902 4.6 compares them."""
+    snapshot = repr(src)
+    result = patch.apply(src)
+    assert repr(src) == snapshot
+    as_text = lambda v: json.dumps(small_cases.canon(v), sort_keys=True)  # noqa: E731
+    assert as_text(result) == as_text(dst)
 
 
 @pytest.mark.parametrize("case", GOLDEN["operations"], ids=lambda c: None)
@@ -190,6 +204,10 @@ def test_string_patch_and_equality():
 @pytest.mark.parametrize("case", GOLDEN["shuffles"], ids=lambda c: None)
 def test_shuffles_exercise_move_detection(case):
     got = fastjsonpatch.make_patch(case["src"], case["dst"])
+    assert repr(small_cases.canon(got.patch)) == case["patch_canon"]
+    if small_cases.has_whole_float(case["src"]) or small_cases.has_whole_float(case["dst"]):
+        assert_makes(got, case["src"], case["dst"])
+        return
     assert repr(got.patch) == case["patch"]
     assert outcome(lambda: got.apply(case["src"])) == case["apply"]
 
