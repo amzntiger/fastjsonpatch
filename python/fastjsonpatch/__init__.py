@@ -32,7 +32,8 @@
 
 """Apply JSON-Patches (RFC 6902) - a faster drop-in for jsonpatch 1.35.
 
-This is jsonpatch's module with its hot paths moved to Rust (``fastjsonpatch._core``):
+This module is derived from jsonpatch 1.35 (BSD, notice above) and maintained here, with
+its hot paths in Rust (``fastjsonpatch._core``):
 
 - ``JsonPatch.from_diff`` / ``make_patch``: ``_core.diff`` yields the same operations
   as ``DiffBuilder``; it returns None for inputs it cannot reproduce exactly, and
