@@ -1,10 +1,12 @@
 # Changelog
 
-## 1.0.0rc1 (2026-10-15)
+## 1.0.0 (2026-10-18)
 
-Release candidate for 1.0: `pip install --pre fastjsonpatch`.
+Same as 1.0.0rc1, plus one fix: Ctrl-C now stops a long `make_patch` or `apply_patch`
+right away. Before, the `KeyboardInterrupt` only came after the call had finished
+(about 60 seconds for a fully shuffled list of 400,000 items). Speed is unchanged.
 
-Changes that need a MAJOR release; each one is in [MIGRATION.md](MIGRATION.md).
+Changes since 0.3.0 that need a MAJOR release; each one is in [MIGRATION.md](MIGRATION.md).
 
 - `make_patch` compares numbers by value, as RFC 6902 4.6 says: `1`, `1.0`, `-0.0` and
   `1e20` are the same numbers as `1`, `1`, `0` and `10**20`. `make_patch({"a": 1},

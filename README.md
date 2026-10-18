@@ -62,7 +62,7 @@ The package has jsonpatch 1.35's API. `JsonPatch.__init__` (validation),
 `JsonPatch.from_diff` (`make_patch`) and `JsonPatch.apply` (`apply_patch`) run in Rust;
 the rest is Python code derived from jsonpatch 1.35 and maintained here. Inputs the Rust code does not
 handle exactly fall back to the Python code before anything is modified:
-non-JSON values, dict or list subclasses, nesting deeper than 1000, a custom `dumps=`
+non-JSON values, dict or list subclasses, nesting deeper than about 1000 levels, a custom `dumps=`
 or `json_dumper`, a custom `pointer_cls`, `operations` or `_get_operation` (for
 `apply`), and operations that would fail.
 
@@ -72,8 +72,8 @@ Known differences (see [MIGRATION.md](https://github.com/amzntiger/fastjsonpatch
   are the numbers 1, 1 and 0, so `{"a": 1}` to `{"a": 1.0}` is an empty patch (jsonpatch
   makes a `replace`). `1` and `true` are still different.
 - Documents nested about 500 levels deep or more, for which jsonpatch raises
-  `RecursionError`, are handled by the Rust code (up to 1000 levels; deeper ones raise
-  `RecursionError` as in jsonpatch).
+  `RecursionError`, work here up to about 1000 levels. Deeper ones raise
+  `RecursionError`, as in jsonpatch; the exact limit is not promised.
 - `JsonPointerException` is fastjsonpatch's own class, not jsonpointer's (there is no
   dependency on jsonpointer), and the error message for a pointer through the end of an
   array names `fastjsonpatch.pointer.EndOfList`.
