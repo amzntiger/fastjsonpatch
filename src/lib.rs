@@ -38,6 +38,28 @@ impl From<pyo3::CastError<'_, '_>> for Fail {
 
 type R<T> = Result<T, Fail>;
 
+/// Lets signal handlers (Ctrl-C) run during long loops: `tick` is cheap and asks
+/// Python for pending signals once every 1024 calls.
+struct Ticker<'py> {
+    py: Python<'py>,
+    n: u32,
+}
+
+impl<'py> Ticker<'py> {
+    fn new(py: Python<'py>) -> Self {
+        Ticker { py, n: 0 }
+    }
+
+    fn tick(&mut self) -> PyResult<()> {
+        self.n = self.n.wrapping_add(1);
+        if self.n % 1024 == 0 {
+            self.py.check_signals()
+        } else {
+            Ok(())
+        }
+    }
+}
+
 // ---------------------------------------------------------------- value kinds
 
 #[derive(Clone, Copy, PartialEq)]
@@ -563,9 +585,11 @@ fn intern<'a, 'py>(
     buckets: &mut AHashMap<u64, Vec<(u32, &'a Bound<'py, PyAny>)>>,
     n_ids: &mut u32,
     rs: &ahash::RandomState,
+    ticker: &mut Ticker,
 ) -> R<Vec<u32>> {
     let mut out = Vec::with_capacity(items.len());
     for o in items {
+        ticker.tick()?;
         let bucket = buckets.entry(json_hash(o, 0, rs)?).or_default();
         let mut id = None;
         for &(i, c) in bucket.iter() {
@@ -590,7 +614,7 @@ fn intern<'a, 'py>(
 
 /// `difflib.SequenceMatcher(None, a, b, autojunk).get_opcodes()`, without the
 /// 'equal' ones, as `(i1, i2, j1, j2)`. Items are ids below `n_ids`.
-fn differing_opcodes(a: &[u32], b: &[u32], n_ids: usize, autojunk: bool) -> Vec<(usize, usize, usize, usize)> {
+fn differing_opcodes(a: &[u32], b: &[u32], n_ids: usize, autojunk: bool, ticker: &mut Ticker) -> PyResult<Vec<(usize, usize, usize, usize)>> {
     let mut b2j: Vec<Vec<usize>> = vec![vec![]; n_ids];
     for (j, &x) in b.iter().enumerate() {
         b2j[x as usize].push(j);
@@ -604,11 +628,12 @@ fn differing_opcodes(a: &[u32], b: &[u32], n_ids: usize, autojunk: bool) -> Vec<
         }
     }
 
-    let find_longest_match = |alo: usize, ahi: usize, blo: usize, bhi: usize| {
+    let mut find_longest_match = |alo: usize, ahi: usize, blo: usize, bhi: usize| -> PyResult<(usize, usize, usize)> {
         let (mut besti, mut bestj, mut bestsize) = (alo, blo, 0);
         let mut j2len: AHashMap<usize, usize> = AHashMap::new();
         let mut newj2len: AHashMap<usize, usize> = AHashMap::new();
         for i in alo..ahi {
+            ticker.tick()?;
             newj2len.clear();
             for &j in &b2j[a[i] as usize] {
                 if j < blo {
@@ -632,14 +657,14 @@ fn differing_opcodes(a: &[u32], b: &[u32], n_ids: usize, autojunk: bool) -> Vec<
         while besti + bestsize < ahi && bestj + bestsize < bhi && a[besti + bestsize] == b[bestj + bestsize] {
             bestsize += 1;
         }
-        (besti, bestj, bestsize)
+        Ok((besti, bestj, bestsize))
     };
 
     let (la, lb) = (a.len(), b.len());
     let mut queue = vec![(0, la, 0, lb)];
     let mut blocks = vec![];
     while let Some((alo, ahi, blo, bhi)) = queue.pop() {
-        let (i, j, k) = find_longest_match(alo, ahi, blo, bhi);
+        let (i, j, k) = find_longest_match(alo, ahi, blo, bhi)?;
         if k > 0 {
             blocks.push((i, j, k));
             if alo < i && blo < j {
@@ -662,7 +687,7 @@ fn differing_opcodes(a: &[u32], b: &[u32], n_ids: usize, autojunk: bool) -> Vec<
         }
         (i, j) = (ai + size, bj + size);
     }
-    runs
+    Ok(runs)
 }
 
 // ---------------------------------------------------------------- diff
@@ -700,10 +725,11 @@ struct Builder<'py> {
     array_data: Vec<Array>,
     items: Vec<Item>,
     path: Path<'py>,
+    ticker: Ticker<'py>,
 }
 
 impl<'py> Builder<'py> {
-    fn new() -> Self {
+    fn new(py: Python<'py>) -> Self {
         let root = Op { kind: OpKind::Add, path: vec![], from: None, value: None, prev: 0, next: 0 };
         Builder {
             ops: vec![root],
@@ -712,6 +738,7 @@ impl<'py> Builder<'py> {
             array_data: vec![],
             items: vec![],
             path: vec![],
+            ticker: Ticker::new(py),
         }
     }
 
@@ -900,6 +927,7 @@ impl<'py> Builder<'py> {
     }
 
     fn item_added(&mut self, key: Part<'py>, item: Bound<'py, PyAny>) -> R<()> {
+        self.ticker.tick()?;
         let target = self.joined(key.clone());
         let mkey = move_key(&item)?;
         if let Some(index) = self.take_index(&mkey, ST_REMOVE) {
@@ -925,6 +953,7 @@ impl<'py> Builder<'py> {
     }
 
     fn item_removed(&mut self, key: Part<'py>, item: Bound<'py, PyAny>) -> R<()> {
+        self.ticker.tick()?;
         let source = self.joined(key);
         let location = self.location(&source);
         let mkey = move_key(&item)?;
@@ -987,7 +1016,7 @@ impl<'py> Builder<'py> {
     }
 
     /// `_differing_runs`
-    fn differing_runs(src: &[Bound<'py, PyAny>], dst: &[Bound<'py, PyAny>]) -> R<Vec<(usize, usize, usize, usize)>> {
+    fn differing_runs(src: &[Bound<'py, PyAny>], dst: &[Bound<'py, PyAny>], ticker: &mut Ticker) -> R<Vec<(usize, usize, usize, usize)>> {
         // Only what is between the common start and end is matched up
         let shorter = src.len().min(dst.len());
         let mut start = 0;
@@ -1004,8 +1033,8 @@ impl<'py> Builder<'py> {
         let rs = ahash::RandomState::with_seeds(1, 2, 3, 4);
         let mut buckets = AHashMap::new();
         let mut n_ids = 0;
-        let mid_src = intern(&src[start..src_end], &mut buckets, &mut n_ids, &rs)?;
-        let mid_dst = intern(&dst[start..dst_end], &mut buckets, &mut n_ids, &rs)?;
+        let mid_src = intern(&src[start..src_end], &mut buckets, &mut n_ids, &rs, ticker)?;
+        let mid_dst = intern(&dst[start..dst_end], &mut buckets, &mut n_ids, &rs, ticker)?;
         let n_ids = n_ids as usize;
         // keys by index into src/dst; only the middle is ever read
         let src_key = |i: usize| mid_src[i - start];
@@ -1036,7 +1065,7 @@ impl<'py> Builder<'py> {
             }
         }
 
-        let runs: Vec<_> = differing_opcodes(&mid_src, &mid_dst, n_ids, !exact)
+        let runs: Vec<_> = differing_opcodes(&mid_src, &mid_dst, n_ids, !exact, ticker)?
             .into_iter()
             .map(|(i1, i2, j1, j2)| (start + i1, start + i2, start + j1, start + j2))
             .collect();
@@ -1059,9 +1088,10 @@ impl<'py> Builder<'py> {
         let dst: Vec<_> = dst.iter().collect();
         // The list has become dst[:j1] + src[i1:] when a run is compared, so src[i1]
         // is at index j1
-        for (i1, i2, j1, j2) in Self::differing_runs(&src, &dst)? {
+        for (i1, i2, j1, j2) in Self::differing_runs(&src, &dst, &mut self.ticker)? {
             let paired = (i2 - i1).min(j2 - j1);
             for key in j1..j1 + paired {
+                self.ticker.tick()?;
                 let (old, new) = (&src[i1 + key - j1], &dst[key]);
                 match (kind(old), kind(new)) {
                     (Kind::Dict, Kind::Dict) => {
@@ -1131,6 +1161,7 @@ impl<'py> Builder<'py> {
         let mut out = vec![];
         let mut curr = self.ops[0].next;
         while curr != 0 {
+            self.ticker.tick()?;
             // 'from' is removed before 'path' is added
             let from = self.ops[curr].from.clone();
             let from_parts = match &from {
@@ -1160,6 +1191,7 @@ impl<'py> Builder<'py> {
         let out = PyList::empty(py);
         let mut i = 0;
         while i < ops.len() {
+            self.ticker.tick()?;
             let d = PyDict::new(py);
             let (kind, path, from, value) = &ops[i];
             if let Some((OpKind::Add, path2, _, value2)) = ops.get(i + 1) {
@@ -1197,7 +1229,7 @@ impl<'py> Builder<'py> {
 /// would produce them; `None` when the reference implementation must be used.
 #[pyfunction]
 fn diff<'py>(py: Python<'py>, src: &Bound<'py, PyAny>, dst: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyList>>> {
-    let mut b = Builder::new();
+    let mut b = Builder::new(py);
     match b.compare_values(None, src, dst).and_then(|_| b.execute(py)) {
         Ok(ops) => Ok(Some(ops)),
         Err(Fail::Unsupported) => Ok(None),
@@ -1556,7 +1588,9 @@ fn items<'py>(patch: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
 /// Check every operation like `JsonPatch.__init__`; unusual ones go to `check(op)`.
 #[pyfunction]
 fn validate(patch: &Bound<'_, PyAny>, check: &Bound<'_, PyAny>) -> PyResult<()> {
+    let mut ticker = Ticker::new(patch.py());
     for op in items(patch)? {
+        ticker.tick()?;
         if fast_op(&op)?.is_none() {
             check.call1((&op,))?;
         }
@@ -1575,7 +1609,9 @@ fn apply<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let ops = items(patch)?;
     let mut plans = Vec::with_capacity(ops.len());
+    let mut ticker = Ticker::new(patch.py());
     for op in &ops {
+        ticker.tick()?;
         let plan = fast_op(op)?;
         if plan.is_none() {
             get_operation.call1((op,))?; // raises like `JsonPatch._ops` would
@@ -1585,6 +1621,7 @@ fn apply<'py>(
     let mut obj = if in_place { obj.clone() } else { deepcopy(obj)? };
     let a = Applier { get_operation, add_stage };
     for (op, plan) in ops.iter().zip(plans) {
+        ticker.tick()?;
         obj = match plan {
             Some((verb, parts)) => match a.try_apply(&obj, op, verb, &parts)? {
                 Some(o) => o,

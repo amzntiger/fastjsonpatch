@@ -1,7 +1,13 @@
 """Using the package the way programs do: threads, big and deep documents, many calls."""
 import copy
 import json
+import signal
+import subprocess
+import sys
 import threading
+import time
+
+import pytest
 
 import fastjsonpatch
 import small_cases
@@ -81,3 +87,49 @@ def test_many_calls_do_not_change_the_inputs():
         patch.apply(src)
         fastjsonpatch.apply_patch(src, patch.patch)
     assert (repr(src), repr(dst)) == snapshot
+
+
+def test_deep_documents_around_the_limit():
+    # 900 levels work; 2000 raise RecursionError instead of crashing
+    for depth, works in ((900, True), (2000, False)):
+        src, dst = small_cases.deep(depth)
+        inner = dst
+        while isinstance(inner[0], list):
+            inner = inner[0]
+        inner[0] = 1
+        if works:
+            patch = fastjsonpatch.make_patch(src, dst)
+            assert fastjsonpatch.apply_patch(src, patch.patch) == dst
+        else:
+            with pytest.raises(RecursionError):
+                fastjsonpatch.make_patch(src, dst)
+
+
+_SLOW_DIFF = """
+import random, sys, fastjsonpatch
+a = [{"i": i, "v": str(i)} for i in range(150000)]
+b = a[:]
+random.Random(1).shuffle(b)
+print("ready", flush=True)
+try:
+    fastjsonpatch.make_patch(a, b)
+    print("finished")
+except KeyboardInterrupt:
+    print("interrupted")
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs SIGINT")
+def test_ctrl_c_stops_a_long_make_patch():
+    proc = subprocess.Popen([sys.executable, "-c", _SLOW_DIFF], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        time.sleep(1)
+        start = time.time()
+        proc.send_signal(signal.SIGINT)
+        assert proc.stdout.readline().strip() == "interrupted"
+        assert time.time() - start < 3  # the whole call takes about 10 s
+    finally:
+        proc.kill()
+        proc.wait()
