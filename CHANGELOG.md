@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `make_patch` no longer leaves a lot of memory behind on macOS when it is called again
+  and again on big changes (30,000 operations). It kept growing by about 5 MB per call;
+  now it stays flat after the first call. Linux was not affected. Output and speed are
+  unchanged.
+
 ## 1.0.0 (2026-10-18)
 
 Same as 1.0.0rc1, plus one fix: Ctrl-C now stops a long `make_patch` or `apply_patch`

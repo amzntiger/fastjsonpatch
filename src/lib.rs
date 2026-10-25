@@ -1088,7 +1088,14 @@ impl<'py> Builder<'py> {
         let dst: Vec<_> = dst.iter().collect();
         // The list has become dst[:j1] + src[i1:] when a run is compared, so src[i1]
         // is at index j1
-        for (i1, i2, j1, j2) in Self::differing_runs(&src, &dst, &mut self.ticker)? {
+        let runs = Self::differing_runs(&src, &dst, &mut self.ticker)?;
+        // Size the big tables up front: growing them by doubling leaves freed blocks of
+        // many different sizes behind, which some allocators keep resident
+        let changed: usize = runs.iter().map(|&(i1, i2, j1, j2)| (i2 - i1) + (j2 - j1)).sum();
+        self.ops.reserve(changed);
+        self.storage[ST_ADD].reserve(changed);
+        self.storage[ST_REMOVE].reserve(changed);
+        for (i1, i2, j1, j2) in runs {
             let paired = (i2 - i1).min(j2 - j1);
             for key in j1..j1 + paired {
                 self.ticker.tick()?;
@@ -1158,7 +1165,7 @@ impl<'py> Builder<'py> {
             self.array_data[a].present_labels = present.iter().map(|&i| self.items[i].label).collect();
             self.array_data[a].present = present;
         }
-        let mut out = vec![];
+        let mut out = Vec::with_capacity(self.ops.len());
         let mut curr = self.ops[0].next;
         while curr != 0 {
             self.ticker.tick()?;
